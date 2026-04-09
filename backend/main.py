@@ -25,6 +25,8 @@ from backend.agent.memory import agent_memory
 from backend.agent.skills import skill_loader
 from backend.agent.audit_log import audit_log
 from backend.agent.self_improve import self_improve_engine
+from backend.agent.self_improver import skill_extractor, self_coder
+from backend.ide_service import ide_service
 from backend.agent.workflows import workflow_engine
 from backend.agent.sub_agents import sub_agent_spawner
 from backend.agent.scheduler import workflow_scheduler
@@ -905,6 +907,127 @@ async def wiki_to_joplin(wiki_slug: str, notebook_id: str = ""):
     if not result:
         raise HTTPException(404, "Wiki article not found")
     return {"status": "synced", "note_id": result.get("id", "")}
+
+
+# ── Self-Improvement (Skill Extraction & Self-Coding) ───────────────────
+
+@app.get("/api/skills")
+async def list_skills(category: str = None):
+    """List all learned skills."""
+    skills = skill_extractor.list_skills(category)
+    return {"skills": [s.to_dict() for s in skills]}
+
+@app.get("/api/skills/{skill_name}")
+async def get_skill(skill_name: str):
+    """Get a specific skill."""
+    skill = skill_extractor.get_skill(skill_name)
+    if not skill:
+        raise HTTPException(404, "Skill not found")
+    return skill.to_dict()
+
+@app.get("/api/skills/relevant")
+async def get_relevant_skills(q: str = Query(...), limit: int = 5):
+    """Get skills relevant to a context."""
+    skills = skill_extractor.get_relevant_skills(q, limit)
+    return {"skills": [s.to_dict() for s in skills]}
+
+class ImprovementProposal(BaseModel):
+    skill_name: str
+    target_file: str = ""
+
+@app.post("/api/self-improvement/proposals")
+async def create_proposal(req: ImprovementProposal):
+    """Generate a self-improvement proposal based on a learned skill."""
+    skill = skill_extractor.get_skill(req.skill_name)
+    if not skill:
+        raise HTTPException(404, "Skill not found")
+    proposal = self_coder.generate_improvement_proposal(skill, req.target_file)
+    proposal_id = self_coder.save_proposal(proposal)
+    return {"proposal_id": proposal_id, "proposal": proposal}
+
+@app.get("/api/self-improvement/proposals")
+async def list_proposals(status: str = None):
+    """List all improvement proposals."""
+    proposals = self_coder.list_proposals(status)
+    return {"proposals": proposals}
+
+@app.post("/api/self-improvement/proposals/{proposal_id}/apply")
+async def apply_proposal(proposal_id: str):
+    """Apply an improvement proposal (requires review)."""
+    result = self_coder.apply_proposal(proposal_id)
+    if "error" in result:
+        raise HTTPException(404, result["error"])
+    return result
+
+
+# ── IDE Service ────────────────────────────────────────────────────────
+
+@app.get("/api/ide/files")
+async def list_ide_files(path: str = "", extensions: str = ""):
+    """List files in the codebase via IDE."""
+    ext_list = extensions.split(",") if extensions else None
+    files = ide_service.list_files(path, ext_list)
+    return {"files": files}
+
+@app.get("/api/ide/file")
+async def read_ide_file(path: str = Query(...)):
+    """Read a file via IDE."""
+    content = ide_service.read_file(path)
+    if content is None:
+        raise HTTPException(404, "File not found")
+    return {"path": path, "content": content}
+
+class IDEFileWrite(BaseModel):
+    path: str
+    content: str
+
+@app.post("/api/ide/file")
+async def write_ide_file(req: IDEFileWrite):
+    """Write a file via IDE."""
+    success = ide_service.write_file(req.path, req.content)
+    if not success:
+        raise HTTPException(500, "Failed to write file")
+    return {"status": "written", "path": req.path}
+
+@app.delete("/api/ide/file")
+async def delete_ide_file(path: str = Query(...)):
+    """Delete a file via IDE."""
+    success = ide_service.delete_file(path)
+    if not success:
+        raise HTTPException(500, "Failed to delete file")
+    return {"status": "deleted", "path": path}
+
+@app.get("/api/ide/search")
+async def search_ide_files(q: str = Query(...), extensions: str = ""):
+    """Search files via IDE."""
+    ext_list = extensions.split(",") if extensions else None
+    results = ide_service.search_files(q, ext_list)
+    return {"results": results}
+
+class CodeChange(BaseModel):
+    file_path: str
+    old_text: str
+    new_text: str
+
+@app.post("/api/ide/apply-change")
+async def apply_ide_change(req: CodeChange):
+    """Apply a code change via IDE."""
+    result = self_coder.apply_code_change(req.file_path, req.old_text, req.new_text)
+    if "error" in result:
+        raise HTTPException(400, result["error"])
+    return result
+
+class CodeGeneration(BaseModel):
+    skill_name: str
+    context: str
+
+@app.post("/api/self-improvement/generate-code")
+async def generate_code_from_skill(req: CodeGeneration):
+    """Generate code based on a learned skill."""
+    result = await self_coder.generate_code_from_skill(req.skill_name, req.context)
+    if "error" in result:
+        raise HTTPException(404, result["error"])
+    return result
 
 
 # ── Run ──────────────────────────────────────────────────────────────

@@ -1,5 +1,69 @@
 # Changelog
 
+## v3.1.0 — Self-Learning & Self-Coding with Deep Repo Analysis
+
+Oak now learns from the repositories it downloads, extracts reusable skills, and can improve its own codebase using the built-in IDE.
+
+### Autonomous Learning Enhancements (`backend/agent/auto_learner.py`)
+- **5-Pass Comprehensive Processing** — Increased from 3 to 5 passes for deeper analysis (config → source → docs → utilities → examples)
+- **Local Repo Cloning** — Clones repositories locally for comprehensive file analysis instead of relying solely on GitHub API
+- **Update Detection** — Tracks commit SHAs to re-process repositories when they're updated
+- **File Walking** — Analyzes up to 500 files per repository with smart filtering (excludes node_modules, __pycache__, etc.)
+- **Improved README Detection** — More specific matching for actual README files (README.md, README.rst, README.txt)
+- **Enhanced Rate Limiting** — Conservative 3-second delay between repos to stay within GitHub API limits
+
+### Skill Extraction (`backend/agent/self_improver.py`)
+- **Automatic Skill Extraction** — Extracts reusable skills from analyzed repositories:
+  - Utility functions and helper modules
+  - Architectural patterns (decorators, context managers, async/await, etc.)
+  - Error handling patterns (custom exceptions)
+  - Testing patterns (pytest, unittest, etc.)
+- **Skill Storage** — Skills stored as markdown files in `data/skills/` with metadata
+- **Skill Indexing** — JSON index tracks all learned skills with applied counts
+- **Relevant Skill Retrieval** — Find skills relevant to a given context using tags and patterns
+
+### Self-Coding Capability (`backend/agent/self_improver.py`)
+- **Improvement Proposals** — Generate code improvement proposals based on learned skills
+- **Target File Detection** — Automatically finds files that could benefit from specific skills:
+  - Utility files for utility skills
+  - Files needing error handling
+  - Files without tests
+- **Code Generation** — Use LLM to generate code based on learned skills and context
+- **Proposal Management** — Track, review, and approve improvement proposals
+
+### Built-in IDE Service (`backend/ide_service.py`)
+- **File Operations** — Read, write, create, delete files in Oak's codebase
+- **File Listing** — Browse codebase with extension filtering
+- **Search** — Full-text search across codebase with context
+- **Diff Application** — Apply code changes (replace old_text with new_text)
+- **Safety** — Excludes sensitive directories (data, .git, __pycache__, etc.)
+
+### Security & Reliability Fixes
+- **GitHub Token Security** — Fixed token exposure in subprocess by using temporary git config instead of embedding in URL
+- **File Locking** — Added cross-platform file locking to RepoTracker to prevent race conditions
+- **Language Detection** — Simplified and fixed language matching logic in `_determine_targets`
+- **Resource Cleanup** — Improved repo cleanup with retries and platform-specific force deletion
+- **Dead Code Removal** — Removed unused `_fetch_key_files` method after refactoring
+
+### API Additions
+- `GET /api/skills` — List all learned skills (filter by category)
+- `GET /api/skills/{skill_name}` — Get a specific skill
+- `GET /api/skills/relevant?q=...` — Get skills relevant to context
+- `POST /api/self-improvement/proposals` — Generate improvement proposal
+- `GET /api/self-improvement/proposals` — List improvement proposals (filter by status)
+- `POST /api/self-improvement/proposals/{id}/apply` — Apply a proposal
+- `POST /api/self-improvement/generate-code` — Generate code from skill
+- `GET /api/ide/files` — List codebase files
+- `GET/POST/DELETE /api/ide/file` — Read/write/delete files via IDE
+- `GET /api/ide/search` — Search codebase
+- `POST /api/ide/apply-change` — Apply code change
+
+### Configuration
+- Added `JOPLIN_TOKEN` and `JOPLIN_URL` environment variables
+- Updated `.env.example` with Joplin configuration
+
+---
+
 ## v3.0.0 — Self-Improving AI Agent with Workflows
 
 CodePilot becomes a self-improving personal AI assistant that auto-researches gaps, acquires skills from GitHub, creates its own skills, automates workflows, and documents everything.

@@ -15,6 +15,20 @@ from pathlib import Path
 from typing import Optional
 import httpx
 from backend.config import DATA_DIR, settings
+from backend.agent.self_improver import skill_extractor
+
+# Cross-platform file locking
+try:
+    import fcntl
+    HAS_FCNTL = True
+except ImportError:
+    HAS_FCNTL = False
+
+try:
+    import msvcrt
+    HAS_MSVCRT = True
+except ImportError:
+    HAS_MSVCRT = False
 
 logger = logging.getLogger("oak.learner")
 
@@ -28,6 +42,41 @@ DAILY_REPORT.mkdir(parents=True, exist_ok=True)
 MAX_PROCESS_COUNT = 5  # Process each repo up to 5 times for comprehensive learning
 
 
+class FileLock:
+    """Cross-platform file lock context manager."""
+
+    def __init__(self, file_path: Path):
+        self.file_path = file_path
+        self.lock_file = None
+        self._locked = False
+
+    def __enter__(self):
+        # Create a lock file
+        self.lock_file = self.file_path.with_suffix(".lock")
+        try:
+            # Try to create/open the lock file exclusively
+            fd = os.open(self.lock_file, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+            self._locked = True
+            return fd
+        except FileExistsError:
+            # Lock file exists, try to wait for it
+            for _ in range(30):  # Wait up to 30 seconds
+                try:
+                    fd = os.open(self.lock_file, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                    self._locked = True
+                    return fd
+                except FileExistsError:
+                    time.sleep(1)
+            raise RuntimeError(f"Could not acquire lock on {self.file_path}")
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._locked and self.lock_file and self.lock_file.exists():
+            try:
+                self.lock_file.unlink()
+            except Exception:
+                pass
+
+
 class RepoTracker:
     """Tracks how many times each repo has been processed."""
 
@@ -36,14 +85,16 @@ class RepoTracker:
         self._load()
 
     def _load(self):
-        if PROCESS_LOG.exists():
-            try:
-                self._data = json.loads(PROCESS_LOG.read_text(encoding="utf-8"))
-            except Exception:
-                self._data = {}
+        with FileLock(PROCESS_LOG):
+            if PROCESS_LOG.exists():
+                try:
+                    self._data = json.loads(PROCESS_LOG.read_text(encoding="utf-8"))
+                except Exception:
+                    self._data = {}
 
     def _save(self):
-        PROCESS_LOG.write_text(json.dumps(self._data, indent=2, default=str), encoding="utf-8")
+        with FileLock(PROCESS_LOG):
+            PROCESS_LOG.write_text(json.dumps(self._data, indent=2, default=str), encoding="utf-8")
 
     def get_count(self, repo_url: str) -> int:
         key = self._key(repo_url)
@@ -132,20 +183,33 @@ class AutoLearner:
 
         clone_dir.parent.mkdir(parents=True, exist_ok=True)
 
-        # Construct clone URL with token if available
         clone_url = f"https://github.com/{repo_name}.git"
-        if settings.github_token:
-            clone_url = f"https://{settings.github_token}@github.com/{repo_name}.git"
-
         logger.info("Cloning %s to %s", repo_name, clone_dir)
 
-        # Run git clone in a subprocess
+        # Create a temporary git config for credentials (avoids token exposure in process list)
+        git_config_dir = clone_dir.parent / ".git_config_temp"
+        git_config_dir.mkdir(parents=True, exist_ok=True)
+        git_config_file = git_config_dir / "config"
+
         try:
+            # Set up credential helper if token is available
+            if settings.github_token:
+                with open(git_config_file, "w") as f:
+                    f.write(f'[credential "https://github.com"]\n')
+                    f.write(f'    helper = !echo "username={settings.github_token}&password="\n')
+
+            # Run git clone with temporary config
+            cmd = ["git", "clone", "--depth", "1", clone_url, str(clone_dir)]
+            env = os.environ.copy()
+            if settings.github_token:
+                env["GIT_CONFIG"] = str(git_config_file)
+
             result = subprocess.run(
-                ["git", "clone", "--depth", "1", clone_url, str(clone_dir)],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=300,  # 5 minute timeout
+                env=env,
             )
             if result.returncode != 0:
                 logger.error("Git clone failed for %s: %s", repo_name, result.stderr)
@@ -158,16 +222,45 @@ class AutoLearner:
         except Exception as e:
             logger.error("Failed to clone %s: %s", repo_name, e)
             raise
+        finally:
+            # Clean up temporary config
+            if git_config_file.exists():
+                try:
+                    git_config_file.unlink()
+                except Exception:
+                    pass
+            try:
+                git_config_dir.rmdir()
+            except Exception:
+                pass
 
     def _cleanup_repo(self, repo_name: str):
-        """Remove the cloned repository after processing."""
+        """Remove the cloned repository after processing with retries."""
         clone_dir = self._get_clone_dir(repo_name)
-        if clone_dir.exists():
+        if not clone_dir.exists():
+            return
+
+        for attempt in range(3):
             try:
                 shutil.rmtree(clone_dir)
                 logger.info("Cleaned up clone of %s", repo_name)
+                return
+            except PermissionError:
+                logger.warning("Cleanup attempt %d failed for %s: permission denied, retrying...", attempt + 1, repo_name)
+                time.sleep(1)
             except Exception as e:
-                logger.warning("Failed to cleanup %s: %s", repo_name, e)
+                logger.warning("Cleanup attempt %d failed for %s: %s", attempt + 1, repo_name, e)
+                time.sleep(1)
+
+        # Final attempt with more forceful cleanup on Windows
+        try:
+            if os.name == 'nt':
+                subprocess.run(['rd', '/s', '/q', str(clone_dir)], shell=True, capture_output=True)
+            else:
+                subprocess.run(['rm', '-rf', str(clone_dir)], capture_output=True)
+            logger.info("Force cleaned up clone of %s", repo_name)
+        except Exception as e:
+            logger.error("Failed to cleanup %s after all attempts: %s", repo_name, e)
 
     def _walk_repo_files(self, clone_dir: Path, max_files: int = 500) -> dict[str, Path]:
         """Walk through all files in the cloned repository."""
@@ -445,11 +538,14 @@ class AutoLearner:
             structure = [f"📁 {p}" if Path(p).parent != Path(".") else f"📄 {Path(p).name}"
                         for p in all_files.keys()][:50]
 
-            # Fetch README if present in clone
+            # Fetch README if present in clone (check exact filename match)
             readme_content = ""
+            readme_patterns = ["README.md", "README.rst", "README.txt", "readme.md", "readme.rst", "readme.txt"]
             for rel_path, file_path in all_files.items():
-                if "readme" in rel_path.lower():
+                filename = Path(rel_path).name
+                if filename in readme_patterns:
                     readme_content = self._read_file_content(file_path)
+                    logger.info("Found README: %s", rel_path)
                     break
 
             # Build knowledge from comprehensive file analysis
@@ -466,6 +562,15 @@ class AutoLearner:
 
             # Store in memory
             self._store_learning(name, knowledge, pass_number)
+
+            # Extract skills from this repository
+            try:
+                skills = skill_extractor.extract_from_knowledge(name, knowledge)
+                if skills:
+                    result["skills_learned"] = len(skills)
+                    logger.info("Extracted %d skills from %s", len(skills), name)
+            except Exception as e:
+                logger.warning("Failed to extract skills from %s: %s", name, e)
 
             result["success"] = True
             self.tracker.record_processing(url, True, len(articles), facts, latest_commit)
@@ -523,60 +628,31 @@ class AutoLearner:
             logger.warning("Error fetching structure for %s: %s", repo_name, e)
         return []
 
-    async def _fetch_key_files(self, repo_name: str, pass_number: int,
-                               structure: list[str], language: str) -> dict[str, str]:
-        """Fetch key files dynamically based on actual repo structure and language."""
-        headers = {"Accept": "application/vnd.github.v3.raw"}
-        if settings.github_token:
-            headers["Authorization"] = f"token {settings.github_token}"
-
-        # Extract actual file names from structure
-        available_files = []
-        for item in structure:
-            if item.startswith("📄"):
-                available_files.append(item.split(" ", 1)[1])
-
-        # Dynamically determine targets based on language and available files
-        targets = self._determine_targets(pass_number, language, available_files)
-
-        files = {}
-        for filename in targets:
-            try:
-                resp = await self._http.get(
-                    f"https://api.github.com/repos/{repo_name}/contents/{filename}",
-                    headers=headers,
-                )
-                if resp.status_code == 200:
-                    files[filename] = resp.text[:5000]
-                elif resp.status_code == 404:
-                    logger.debug("File not found in %s: %s", repo_name, filename)
-                else:
-                    logger.debug("Failed to fetch %s from %s: %s", filename, repo_name, resp.status_code)
-                await asyncio.sleep(1)  # Rate limit (conservative)
-            except Exception as e:
-                logger.debug("Error fetching %s from %s: %s", filename, repo_name, e)
-        return files
-
     def _determine_targets(self, pass_number: int, language: str,
                           available_files: list[str]) -> list[str]:
         """Determine which files to fetch based on pass, language, and available files."""
         targets = []
 
+        # Normalize language for matching
+        lang_lower = language.lower() if language else ""
+
         if pass_number == 1:
             # Config files based on language
             lang_configs = {
-                "Python": ["requirements.txt", "pyproject.toml", "setup.py", "setup.cfg", "Pipfile", "poetry.lock", "environment.yml", "setup.cfg"],
-                "TypeScript": ["package.json", "tsconfig.json", "yarn.lock", "package-lock.json", "tsconfig.base.json"],
-                "JavaScript": ["package.json", "yarn.lock", "package-lock.json"],
-                "Rust": ["Cargo.toml", "Cargo.lock"],
-                "Go": ["go.mod", "go.sum", "go.work"],
-                "Java": ["pom.xml", "build.gradle", "build.gradle.kts", "gradle.properties"],
-                "C++": ["CMakeLists.txt", "Makefile", "configure.ac"],
-                "Ruby": ["Gemfile", "Gemfile.lock", "Rakefile"],
-                "PHP": ["composer.json", "composer.lock"],
+                "python": ["requirements.txt", "pyproject.toml", "setup.py", "setup.cfg", "Pipfile", "poetry.lock", "environment.yml"],
+                "typescript": ["package.json", "tsconfig.json", "yarn.lock", "package-lock.json", "tsconfig.base.json"],
+                "javascript": ["package.json", "yarn.lock", "package-lock.json"],
+                "rust": ["Cargo.toml", "Cargo.lock"],
+                "go": ["go.mod", "go.sum", "go.work"],
+                "java": ["pom.xml", "build.gradle", "build.gradle.kts", "gradle.properties"],
+                "c++": ["CMakeLists.txt", "Makefile", "configure.ac"],
+                "ruby": ["Gemfile", "Gemfile.lock", "Rakefile"],
+                "php": ["composer.json", "composer.lock"],
             }
+
+            # Match language (case-insensitive, partial match)
             for lang, configs in lang_configs.items():
-                if language in lang or any(lang.lower() in language.lower() for lang in ["python", "typescript", "javascript", "rust", "go", "java", "c++", "ruby", "php"]):
+                if lang in lang_lower or lang_lower in lang:
                     targets.extend(configs)
                     break
 
@@ -586,14 +662,15 @@ class AutoLearner:
         elif pass_number == 2:
             # Source files - look for main entry points and core source files
             source_patterns = {
-                "Python": ["main.py", "app.py", "__init__.py", "src/__init__.py", "manage.py", "wsgi.py", "asgi.py"],
-                "TypeScript": ["index.ts", "main.ts", "src/index.ts", "src/main.ts", "app.ts", "server.ts"],
-                "JavaScript": ["index.js", "main.js", "src/index.js", "src/main.js", "app.js", "server.js"],
-                "Rust": ["main.rs", "lib.rs", "src/main.rs", "src/lib.rs"],
-                "Go": ["main.go", "cmd/main.go", "server.go"],
+                "python": ["main.py", "app.py", "__init__.py", "src/__init__.py", "manage.py", "wsgi.py", "asgi.py"],
+                "typescript": ["index.ts", "main.ts", "src/index.ts", "src/main.ts", "app.ts", "server.ts"],
+                "javascript": ["index.js", "main.js", "src/index.js", "src/main.js", "app.js", "server.js"],
+                "rust": ["main.rs", "lib.rs", "src/main.rs", "src/lib.rs"],
+                "go": ["main.go", "cmd/main.go", "server.go"],
             }
+
             for lang, patterns in source_patterns.items():
-                if language in lang or any(lang.lower() in language.lower() for lang in ["python", "typescript", "javascript", "rust", "go"]):
+                if lang in lang_lower or lang_lower in lang:
                     targets.extend(patterns)
                     break
 

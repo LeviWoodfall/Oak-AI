@@ -27,7 +27,9 @@ Like Claude Code, Windsurf, or Cursor — but local, self-improving, and yours.
 
 ### Autonomous Learning (the sun ☀️)
 - **Daily Auto-Learner** — Discovers top 20 trending GitHub repos worldwide, clones/analyzes READMEs, extracts technologies, builds wiki articles and tiered context.
-- **3-Pass Processing** — Each repo processed up to 3 times (overview → technical deep-dive → patterns & lessons), then skipped.
+- **5-Pass Comprehensive Processing** — Each repo processed up to 5 times with local cloning for deep analysis (config → source → docs → utilities → examples), with update detection to re-process when repos change.
+- **Skill Extraction** — Automatically extracts reusable skills, patterns, and best practices from analyzed repos (utility functions, architectural patterns, error handling, testing patterns).
+- **Self-Coding Capability** — Oak can apply learned skills to its own codebase using the built-in IDE, generating improvement proposals and code changes based on extracted patterns.
 - **Fact Checker (2x frequency)** — Cross-references wiki claims against live GitHub API, detects contradictions in memory, flags stale context. Runs every 12h (twice as often as learning).
 - **Self-Maintenance (every 6h)** — Syntax verification, dependency audits, endpoint health checks, memory integrity, storage cleanup, self-tests, documentation freshness. Outputs a health score 0-100%.
 
@@ -180,6 +182,17 @@ Create markdown articles to build your local knowledge base. Articles are automa
 | `/api/github/repos/{name}/file` | GET | Read a file |
 | `/api/github/repos/{name}/index` | POST | Index repo for RAG |
 | `/api/search` | GET | Search wiki + code |
+| `/api/skills` | GET | List all learned skills |
+| `/api/skills/{skill_name}` | GET | Get a specific skill |
+| `/api/skills/relevant` | GET | Get skills relevant to context |
+| `/api/self-improvement/proposals` | POST | Generate improvement proposal |
+| `/api/self-improvement/proposals` | GET | List improvement proposals |
+| `/api/self-improvement/proposals/{id}/apply` | POST | Apply a proposal |
+| `/api/self-improvement/generate-code` | POST | Generate code from skill |
+| `/api/ide/files` | GET | List codebase files |
+| `/api/ide/file` | GET/POST/DELETE | Read/write/delete files |
+| `/api/ide/search` | GET | Search codebase |
+| `/api/ide/apply-change` | POST | Apply code change |
 
 ## Environment Variables
 
@@ -188,6 +201,8 @@ Create markdown articles to build your local knowledge base. Articles are automa
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL |
 | `CODEPILOT_MODEL` | Auto-detected | Override default model |
 | `GITHUB_TOKEN` | (none) | GitHub personal access token |
+| `JOPLIN_TOKEN` | (none) | Joplin Web Clipper token |
+| `JOPLIN_URL` | `http://localhost:41184` | Joplin Data API URL |
 | `CODE_EXEC_TIMEOUT` | `30` | Code execution timeout (seconds) |
 | `CODE_EXEC_ENABLED` | `true` | Enable/disable code execution |
 
@@ -203,7 +218,14 @@ codepilot/
 │   ├── wiki_service.py       # Markdown wiki + vector indexing
 │   ├── vector_store.py       # ChromaDB semantic search
 │   ├── code_executor.py      # Sandboxed Python execution
-│   └── conversations.py      # Chat history persistence
+│   ├── conversations.py      # Chat history persistence
+│   ├── joplin_service.py     # Joplin notes integration
+│   ├── ide_service.py        # Built-in IDE file operations
+│   └── agent/
+│       ├── auto_learner.py   # Autonomous repo learning
+│       ├── self_improver.py  # Skill extraction & self-coding
+│       ├── self_improve.py   # GitHub skill acquisition
+│       └── ...
 ├── frontend/
 │   ├── index.html            # Single-page app
 │   └── js/app.js             # Frontend logic
@@ -211,7 +233,9 @@ codepilot/
 │   ├── wiki/                 # Markdown wiki articles
 │   ├── repos/                # Cloned GitHub repos
 │   ├── chroma/               # Vector DB storage
-│   └── conversations/        # Chat history
+│   ├── conversations/        # Chat history
+│   ├── skills/               # Learned skills storage
+│   └── learner/              # Auto-learner data
 ├── requirements.txt
 ├── run.py                    # Entry point
 ├── .env.example
