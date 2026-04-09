@@ -1,6 +1,11 @@
 """
-Scheduled Workflow Runner — background async loop for cron-like execution.
-Runs workflows on their defined schedule (daily, hourly, every Xm, etc.).
+Oak Scheduler — background async loop for all autonomous operations.
+
+Manages three cadences:
+  1. Workflows:    user-defined scheduled workflows (daily/hourly/every Xm)
+  2. Auto-Learner: daily discovery + processing of trending repos
+  3. Fact Checker:  runs TWICE as often as learning (every 12h)
+  4. Maintenance:   self-tests, vuln checks, cleanup (every 6h)
 """
 import asyncio
 import logging
@@ -9,6 +14,11 @@ from datetime import datetime, timezone
 from typing import Optional
 
 logger = logging.getLogger("oak.agent.scheduler")
+
+# Autonomous task intervals (seconds)
+LEARN_INTERVAL = 86400       # Daily (24h)
+FACT_CHECK_INTERVAL = 43200  # Twice daily (12h) — 2x learning frequency
+MAINTENANCE_INTERVAL = 21600 # Every 6 hours
 
 
 def _parse_interval_seconds(schedule: str) -> Optional[int]:
@@ -43,13 +53,18 @@ def _parse_interval_seconds(schedule: str) -> Optional[int]:
 
 
 class WorkflowScheduler:
-    """Background task that runs scheduled workflows."""
+    """Background task that runs scheduled workflows AND autonomous systems."""
 
     def __init__(self):
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._check_interval = 60  # check every 60 seconds
         self._last_run: dict[str, float] = {}
+        # Autonomous system tracking
+        self._last_learn = 0.0
+        self._last_fact_check = 0.0
+        self._last_maintenance = 0.0
+        self._autonomous_enabled = True
 
     @property
     def running(self) -> bool:
@@ -61,7 +76,7 @@ class WorkflowScheduler:
             return
         self._running = True
         self._task = asyncio.create_task(self._loop())
-        logger.info("Workflow scheduler started")
+        logger.info("Scheduler started (workflows + autonomous learning + fact-check + maintenance)")
 
     def stop(self):
         """Stop the scheduler."""
@@ -69,13 +84,20 @@ class WorkflowScheduler:
         if self._task:
             self._task.cancel()
             self._task = None
-        logger.info("Workflow scheduler stopped")
+        logger.info("Scheduler stopped")
+
+    def set_autonomous(self, enabled: bool):
+        """Enable/disable autonomous learning, fact-checking, and maintenance."""
+        self._autonomous_enabled = enabled
+        logger.info("Autonomous systems %s", "enabled" if enabled else "disabled")
 
     async def _loop(self):
-        """Main scheduler loop — checks workflows and runs due ones."""
+        """Main scheduler loop."""
         while self._running:
             try:
                 await self._check_and_run()
+                if self._autonomous_enabled:
+                    await self._check_autonomous()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -112,12 +134,78 @@ class WorkflowScheduler:
                     logger.error("Scheduler: '%s' failed — %s", wf_dict["name"], e)
                     self._last_run[wf_id] = now
 
+    async def _check_autonomous(self):
+        """Check and run autonomous systems on their schedules."""
+        now = time.time()
+
+        # Auto-Learner: daily
+        if now - self._last_learn >= LEARN_INTERVAL:
+            logger.info("Scheduler: starting daily learning cycle")
+            try:
+                from backend.agent.auto_learner import auto_learner
+                report = await auto_learner.run_daily()
+                self._last_learn = now
+                logger.info("Scheduler: learning complete — %d repos, %d articles",
+                            report.get("repos_processed", 0),
+                            report.get("articles_created", 0))
+            except Exception as e:
+                logger.error("Scheduler: learning failed — %s", e)
+                self._last_learn = now  # Don't retry immediately
+
+        # Fact Checker: twice daily (2x learning frequency)
+        if now - self._last_fact_check >= FACT_CHECK_INTERVAL:
+            logger.info("Scheduler: starting fact-check cycle")
+            try:
+                from backend.agent.fact_checker import fact_checker
+                report = await fact_checker.run_verification()
+                self._last_fact_check = now
+                logger.info("Scheduler: fact-check complete — %d issues, %d fixed",
+                            report.get("issues_found", 0),
+                            report.get("issues_fixed", 0))
+            except Exception as e:
+                logger.error("Scheduler: fact-check failed — %s", e)
+                self._last_fact_check = now
+
+        # Self-Maintenance: every 6 hours
+        if now - self._last_maintenance >= MAINTENANCE_INTERVAL:
+            logger.info("Scheduler: starting maintenance cycle")
+            try:
+                from backend.agent.self_maintenance import self_maintenance
+                report = await self_maintenance.run_maintenance()
+                self._last_maintenance = now
+                logger.info("Scheduler: maintenance complete — health=%d%%",
+                            report.get("health_score", 0))
+            except Exception as e:
+                logger.error("Scheduler: maintenance failed — %s", e)
+                self._last_maintenance = now
+
     def status(self) -> dict:
+        now = time.time()
         return {
             "running": self._running,
+            "autonomous_enabled": self._autonomous_enabled,
             "check_interval": self._check_interval,
-            "last_runs": {k: datetime.fromtimestamp(v, tz=timezone.utc).isoformat()
-                          for k, v in self._last_run.items()},
+            "workflow_last_runs": {
+                k: datetime.fromtimestamp(v, tz=timezone.utc).isoformat()
+                for k, v in self._last_run.items()
+            },
+            "autonomous": {
+                "learn": {
+                    "interval_hours": LEARN_INTERVAL / 3600,
+                    "last_run": datetime.fromtimestamp(self._last_learn, tz=timezone.utc).isoformat() if self._last_learn else None,
+                    "next_in_minutes": max(0, round((LEARN_INTERVAL - (now - self._last_learn)) / 60)) if self._last_learn else 0,
+                },
+                "fact_check": {
+                    "interval_hours": FACT_CHECK_INTERVAL / 3600,
+                    "last_run": datetime.fromtimestamp(self._last_fact_check, tz=timezone.utc).isoformat() if self._last_fact_check else None,
+                    "next_in_minutes": max(0, round((FACT_CHECK_INTERVAL - (now - self._last_fact_check)) / 60)) if self._last_fact_check else 0,
+                },
+                "maintenance": {
+                    "interval_hours": MAINTENANCE_INTERVAL / 3600,
+                    "last_run": datetime.fromtimestamp(self._last_maintenance, tz=timezone.utc).isoformat() if self._last_maintenance else None,
+                    "next_in_minutes": max(0, round((MAINTENANCE_INTERVAL - (now - self._last_maintenance)) / 60)) if self._last_maintenance else 0,
+                },
+            },
         }
 
 

@@ -25,6 +25,12 @@ Like Claude Code, Windsurf, or Cursor — but local, self-improving, and yours.
 - **GitHub Integration** — Clone, browse, pull, index repos into knowledge base.
 - **Code Execution** — Sandboxed Python runner with timeout.
 
+### Autonomous Learning (the sun ☀️)
+- **Daily Auto-Learner** — Discovers top 20 trending GitHub repos worldwide, clones/analyzes READMEs, extracts technologies, builds wiki articles and tiered context.
+- **3-Pass Processing** — Each repo processed up to 3 times (overview → technical deep-dive → patterns & lessons), then skipped.
+- **Fact Checker (2x frequency)** — Cross-references wiki claims against live GitHub API, detects contradictions in memory, flags stale context. Runs every 12h (twice as often as learning).
+- **Self-Maintenance (every 6h)** — Syntax verification, dependency audits, endpoint health checks, memory integrity, storage cleanup, self-tests, documentation freshness. Outputs a health score 0-100%.
+
 ### Workflow Automation
 - **Define workflows** — JSON step sequences chaining agent tools together.
 - **4 Built-in Templates** — Git summary, code quality, research & document, wiki backup.
@@ -39,21 +45,26 @@ Like Claude Code, Windsurf, or Cursor — but local, self-improving, and yours.
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────┐
-│           Browser UI (HUD + 6 Tabs)                   │
-│  Chat │ IDE (Monaco) │ Wiki │ Notes │ GitHub │ Settings│
-├──────────────────────────────────────────────────────┤
-│               FastAPI Server (:8800)                  │
-│  ┌──────────────────────────────────────────────┐    │
-│  │              Agent Core                       │    │
-│  │  14 Tools │ Skills │ Memory │ Sub-Agents      │    │
-│  │  Self-Improve │ Workflows │ Scheduler         │    │
-│  │  Tiered Context (L0/L1/L2) │ Audit Log        │    │
-│  └──────────────────────────────────────────────┘    │
-│  LLM │ Wiki │ Joplin │ Whisper │ Vector │ Executor   │
-├──────────────────────────────────────────────────────┤
-│  Ollama (:11434)  │  ChromaDB  │  Joplin (:41184)    │
-└──────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│            Browser UI (HUD + 6 Tabs)                      │
+│  Chat │ IDE (Monaco) │ Wiki │ Notes │ GitHub │ Settings    │
+├──────────────────────────────────────────────────────────┤
+│                FastAPI Server (:8800)                      │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │               Agent Core                            │  │
+│  │  14 Tools │ Skills │ Memory │ Sub-Agents            │  │
+│  │  Self-Improve │ Workflows │ Scheduler               │  │
+│  │  Tiered Context (L0/L1/L2) │ Audit Log              │  │
+│  └────────────────────────────────────────────────────┘  │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │           Autonomous Systems (always-on)            │  │
+│  │  Auto-Learner (24h) │ Fact Checker (12h)            │  │
+│  │  Self-Maintenance (6h) │ Scheduled Workflows        │  │
+│  └────────────────────────────────────────────────────┘  │
+│  LLM │ Wiki │ OneNote │ Whisper │ Vector │ Executor       │
+├──────────────────────────────────────────────────────────┤
+│  Ollama (:11434)  │  ChromaDB  │  Microsoft Graph         │
+└──────────────────────────────────────────────────────────┘
 ```
 
 ## Prerequisites

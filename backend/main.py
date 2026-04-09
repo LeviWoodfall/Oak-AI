@@ -29,6 +29,9 @@ from backend.agent.workflows import workflow_engine
 from backend.agent.sub_agents import sub_agent_spawner
 from backend.agent.scheduler import workflow_scheduler
 from backend.agent.tiered_context import tiered_context
+from backend.agent.auto_learner import auto_learner
+from backend.agent.fact_checker import fact_checker
+from backend.agent.self_maintenance import self_maintenance
 from backend.whisper_service import whisper_service
 from backend.onenote_service import onenote_service
 
@@ -44,6 +47,13 @@ app = FastAPI(title="Oak", version=settings.app_version)
 
 FRONTEND_DIR = BASE_DIR / "frontend"
 app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Auto-start the scheduler with autonomous learning on server boot."""
+    workflow_scheduler.start()
+    logger.info("Autonomous systems armed: learn(24h) + fact-check(12h) + maintenance(6h)")
 
 
 # ── Request models ───────────────────────────────────────────────────
@@ -625,6 +635,69 @@ async def scheduler_start():
 async def scheduler_stop():
     workflow_scheduler.stop()
     return {"status": "stopped"}
+
+@app.post("/api/scheduler/autonomous")
+async def scheduler_autonomous(enabled: bool = True):
+    workflow_scheduler.set_autonomous(enabled)
+    return {"autonomous_enabled": enabled}
+
+
+# ── Auto-Learner ─────────────────────────────────────────────────────
+
+@app.get("/api/learner/status")
+async def learner_status():
+    return auto_learner.status()
+
+@app.post("/api/learner/run")
+async def learner_run_now():
+    return await auto_learner.run_daily()
+
+@app.get("/api/learner/repos")
+async def learner_repos():
+    return {"repos": auto_learner.get_processed_repos()}
+
+@app.get("/api/learner/reports")
+async def learner_reports(limit: int = 7):
+    return {"reports": auto_learner.get_daily_reports(limit)}
+
+@app.get("/api/learner/discover")
+async def learner_discover(limit: int = 20):
+    repos = await auto_learner.discover_trending_repos(limit)
+    return {"repos": repos}
+
+
+# ── Fact Checker ─────────────────────────────────────────────────────
+
+@app.get("/api/fact-checker/status")
+async def fact_checker_status():
+    return fact_checker.status()
+
+@app.post("/api/fact-checker/run")
+async def fact_checker_run_now():
+    return await fact_checker.run_verification()
+
+@app.get("/api/fact-checker/flagged")
+async def fact_checker_flagged():
+    return {"flagged": fact_checker.get_flagged()}
+
+@app.get("/api/fact-checker/reports")
+async def fact_checker_reports(limit: int = 10):
+    return {"reports": fact_checker.get_reports(limit)}
+
+
+# ── Self-Maintenance ─────────────────────────────────────────────────
+
+@app.get("/api/maintenance/status")
+async def maintenance_status():
+    return self_maintenance.status()
+
+@app.post("/api/maintenance/run")
+async def maintenance_run_now():
+    return await self_maintenance.run_maintenance()
+
+@app.get("/api/maintenance/reports")
+async def maintenance_reports(limit: int = 10):
+    return {"reports": self_maintenance.get_reports(limit)}
 
 
 # ── Tiered Context ───────────────────────────────────────────────────
