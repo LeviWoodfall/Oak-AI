@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Oak — Self-Improving AI Coding Agent</title>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        cp: {
+                            bg: '#0f1117',
+                            surface: '#1a1d27',
+                            surface2: '#232734',
+                            border: '#2d3348',
+                            accent: '#6c63ff',
+                            accent2: '#4ecdc4',
+                            text: '#e1e4ed',
+                            muted: '#8b90a0',
+                            success: '#4ecdc4',
+                            warning: '#f5a623',
+                            error: '#ff6b6b',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- Monaco Editor -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/monaco-editor@0.47.0/min/vs/editor/editor.main.css">
+
+    <!-- Marked (Markdown renderer) -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+
+    <!-- Highlight.js for code blocks in chat -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/highlight.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/languages/python.min.js"></script>
+
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@0.344.0/dist/umd/lucide.js"></script>
+
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #1a1d27; }
+        ::-webkit-scrollbar-thumb { background: #3d4460; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #6c63ff; }
+
+        /* Chat messages */
+        .msg-user { background: #232734; border-left: 3px solid #6c63ff; }
+        .msg-assistant { background: #1a1d27; border-left: 3px solid #4ecdc4; }
+        .msg-assistant pre { background: #0f1117; border-radius: 8px; padding: 12px; overflow-x: auto; margin: 8px 0; }
+        .msg-assistant code:not(pre code) { background: #2d3348; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+        .msg-assistant ul, .msg-assistant ol { padding-left: 1.5em; margin: 8px 0; }
+        .msg-assistant h1, .msg-assistant h2, .msg-assistant h3 { margin: 12px 0 6px; }
+        .msg-assistant table { border-collapse: collapse; margin: 8px 0; }
+        .msg-assistant th, .msg-assistant td { border: 1px solid #2d3348; padding: 6px 10px; }
+
+        /* Typing indicator */
+        .typing-dot { animation: blink 1.4s infinite both; }
+        .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+        .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes blink { 0%, 80%, 100% { opacity: 0; } 40% { opacity: 1; } }
+
+        /* Tab active state */
+        .tab-active { border-bottom: 2px solid #6c63ff; color: #6c63ff; }
+
+        /* Sidebar item hover */
+        .sidebar-item:hover { background: #232734; }
+        .sidebar-item.active { background: #232734; border-right: 2px solid #6c63ff; }
+
+        /* Monaco container */
+        #monaco-container { width: 100%; height: 100%; }
+
+        /* Fade in */
+        .fade-in { animation: fadeIn 0.2s ease-in; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+        /* Wiki content */
+        .wiki-content h1 { font-size: 1.5em; font-weight: 700; margin: 16px 0 8px; }
+        .wiki-content h2 { font-size: 1.3em; font-weight: 600; margin: 14px 0 6px; }
+        .wiki-content h3 { font-size: 1.1em; font-weight: 600; margin: 12px 0 4px; }
+        .wiki-content pre { background: #0f1117; border-radius: 8px; padding: 12px; overflow-x: auto; margin: 8px 0; }
+        .wiki-content code:not(pre code) { background: #2d3348; padding: 2px 6px; border-radius: 4px; }
+        .wiki-content ul, .wiki-content ol { padding-left: 1.5em; margin: 8px 0; }
+        .wiki-content blockquote { border-left: 3px solid #6c63ff; padding-left: 12px; color: #8b90a0; margin: 8px 0; }
+    </style>
+</head>
+<body class="bg-cp-bg text-cp-text h-screen flex flex-col overflow-hidden">
+
+    <!-- ═══ Top Bar ═══ -->
+    <header class="flex items-center justify-between px-4 h-12 bg-cp-surface border-b border-cp-border flex-shrink-0">
+        <div class="flex items-center gap-3">
+            <div class="w-7 h-7 bg-cp-accent rounded-lg flex items-center justify-center">
+                <i data-lucide="terminal" class="w-4 h-4 text-white"></i>
+            </div>
+            <span class="font-semibold text-sm">Oak</span>
+            <span id="status-badge" class="text-xs px-2 py-0.5 rounded-full bg-cp-surface2 text-cp-muted">checking...</span>
+        </div>
+        <nav class="flex items-center gap-1">
+            <button onclick="switchTab('chat')" id="tab-chat" class="tab-active px-3 py-2 text-sm font-medium flex items-center gap-1.5 border-b-2 border-transparent transition-colors">
+                <i data-lucide="message-square" class="w-4 h-4"></i> Chat
+            </button>
+            <button onclick="switchTab('ide')" id="tab-ide" class="px-3 py-2 text-sm font-medium flex items-center gap-1.5 border-b-2 border-transparent transition-colors text-cp-muted hover:text-cp-text">
+                <i data-lucide="code-2" class="w-4 h-4"></i> IDE
+            </button>
+            <button onclick="switchTab('wiki')" id="tab-wiki" class="px-3 py-2 text-sm font-medium flex items-center gap-1.5 border-b-2 border-transparent transition-colors text-cp-muted hover:text-cp-text">
+                <i data-lucide="book-open" class="w-4 h-4"></i> Wiki
+            </button>
+            <button onclick="switchTab('notes')" id="tab-notes" class="px-3 py-2 text-sm font-medium flex items-center gap-1.5 border-b-2 border-transparent transition-colors text-cp-muted hover:text-cp-text">
+                <i data-lucide="notebook-pen" class="w-4 h-4"></i> Notes
+            </button>
+            <button onclick="switchTab('github')" id="tab-github" class="px-3 py-2 text-sm font-medium flex items-center gap-1.5 border-b-2 border-transparent transition-colors text-cp-muted hover:text-cp-text">
+                <i data-lucide="github" class="w-4 h-4"></i> GitHub
+            </button>
+            <button onclick="switchTab('settings')" id="tab-settings" class="px-3 py-2 text-sm font-medium flex items-center gap-1.5 border-b-2 border-transparent transition-colors text-cp-muted hover:text-cp-text">
+                <i data-lucide="settings" class="w-4 h-4"></i>
+            </button>
+        </nav>
+    </header>
+
+    <!-- ═══ Main Content ═══ -->
+    <div class="flex flex-1 overflow-hidden">
+
+        <!-- ── Sidebar ── -->
+        <aside id="sidebar" class="w-60 bg-cp-surface border-r border-cp-border flex flex-col flex-shrink-0">
+            <!-- Chat sidebar (default) -->
+            <div id="sidebar-chat" class="flex flex-col flex-1">
+                <div class="p-3 border-b border-cp-border">
+                    <button onclick="newConversation()" class="w-full py-2 px-3 bg-cp-accent hover:bg-cp-accent/80 text-white text-sm rounded-lg flex items-center justify-center gap-2 transition-colors">
+                        <i data-lucide="plus" class="w-4 h-4"></i> New Chat
+                    </button>
+                </div>
+                <div id="conversation-list" class="flex-1 overflow-y-auto p-2 space-y-1"></div>
+            </div>
+            <!-- Wiki sidebar -->
+            <div id="sidebar-wiki" class="flex flex-col flex-1 hidden">
+                <div class="p-3 border-b border-cp-border">
+                    <button onclick="showWikiEditor()" class="w-full py-2 px-3 bg-cp-accent hover:bg-cp-accent/80 text-white text-sm rounded-lg flex items-center justify-center gap-2 transition-colors">
+                        <i data-lucide="plus" class="w-4 h-4"></i> New Article
+                    </button>
+                </div>
+                <div class="p-2 border-b border-cp-border">
+                    <input type="text" id="wiki-search" placeholder="Search wiki..." oninput="searchWiki(this.value)"
+                        class="w-full px-3 py-1.5 bg-cp-bg border border-cp-border rounded text-sm text-cp-text placeholder-cp-muted focus:border-cp-accent focus:outline-none">
+                </div>
+                <div id="wiki-article-list" class="flex-1 overflow-y-auto p-2 space-y-1"></div>
+                <div id="wiki-tags" class="p-2 border-t border-cp-border flex flex-wrap gap-1"></div>
+            </div>
+            <!-- GitHub sidebar -->
+            <div id="sidebar-github" class="flex flex-col flex-1 hidden">
+                <div class="p-3 border-b border-cp-border">
+                    <button onclick="showCloneModal()" class="w-full py-2 px-3 bg-cp-accent hover:bg-cp-accent/80 text-white text-sm rounded-lg flex items-center justify-center gap-2 transition-colors">
+                        <i data-lucide="git-branch" class="w-4 h-4"></i> Clone Repo
+                    </button>
+                </div>
+                <div id="local-repo-list" class="flex-1 overflow-y-auto p-2 space-y-1"></div>
+            </div>
+            <!-- Notes (Joplin) sidebar -->
+            <div id="sidebar-notes" class="flex flex-col flex-1 hidden">
+                <div class="p-3 border-b border-cp-border">
+                    <button onclick="showNoteEditor()" class="w-full py-2 px-3 bg-cp-accent hover:bg-cp-accent/80 text-white text-sm rounded-lg flex items-center justify-center gap-2 transition-colors">
+                        <i data-lucide="plus" class="w-4 h-4"></i> New Note
+                    </button>
+                </div>
+                <div class="p-2 border-b border-cp-border">
+                    <input type="text" id="notes-search" placeholder="Search notes..." oninput="searchJoplinNotes(this.value)"
+                        class="w-full px-3 py-1.5 bg-cp-bg border border-cp-border rounded text-sm text-cp-text placeholder-cp-muted focus:border-cp-accent focus:outline-none">
+                </div>
+                <div class="p-2 border-b border-cp-border">
+                    <select id="notebook-select" onchange="loadNotebookNotes(this.value)"
+                        class="w-full px-2 py-1.5 bg-cp-bg border border-cp-border rounded text-sm text-cp-text focus:border-cp-accent focus:outline-none">
+                        <option value="">All Notebooks</option>
+                    </select>
+                </div>
+                <div id="notes-list" class="flex-1 overflow-y-auto p-2 space-y-1"></div>
+            </div>
+            <!-- IDE sidebar -->
+            <div id="sidebar-ide" class="flex flex-col flex-1 hidden">
+                <div class="p-3 border-b border-cp-border text-xs text-cp-muted uppercase tracking-wide">Files</div>
+                <div id="ide-file-list" class="flex-1 overflow-y-auto p-2 space-y-1"></div>
+            </div>
+        </aside>
+
+        <!-- ── Content Panels ── -->
+        <main class="flex-1 flex flex-col overflow-hidden">
+
+            <!-- CHAT Panel -->
+            <div id="panel-chat" class="flex-1 flex flex-col">
+                <div id="chat-messages" class="flex-1 overflow-y-auto p-4 space-y-4"></div>
+                <div class="p-4 border-t border-cp-border bg-cp-surface">
+                    <div class="flex items-end gap-2">
+                        <div class="flex-1 relative">
+                            <textarea id="chat-input" rows="1" placeholder="Ask Oak anything..."
+                                class="w-full px-4 py-3 bg-cp-bg border border-cp-border rounded-xl text-sm text-cp-text placeholder-cp-muted focus:border-cp-accent focus:outline-none resize-none"
+                                onkeydown="handleChatKey(event)" oninput="autoResize(this)"></textarea>
+                        </div>
+                        <div class="flex gap-1">
+                            <button id="rag-toggle" onclick="toggleRAG()" title="Knowledge base context"
+                                class="p-2.5 rounded-xl bg-cp-accent/20 text-cp-accent hover:bg-cp-accent/30 transition-colors">
+                                <i data-lucide="brain" class="w-5 h-5"></i>
+                            </button>
+                            <button onclick="sendChat()" class="p-2.5 rounded-xl bg-cp-accent text-white hover:bg-cp-accent/80 transition-colors">
+                                <i data-lucide="send" class="w-5 h-5"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="flex items-center justify-between mt-2 text-xs text-cp-muted">
+                        <span id="model-label">Model: loading...</span>
+                        <span id="rag-label" class="text-cp-accent">RAG: On</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- IDE Panel -->
+            <div id="panel-ide" class="flex-1 flex flex-col hidden">
+                <div class="flex items-center gap-2 px-4 py-2 border-b border-cp-border bg-cp-surface">
+                    <span id="ide-filename" class="text-sm text-cp-muted">untitled.py</span>
+                    <div class="flex-1"></div>
+                    <button onclick="runEditorCode()" class="px-3 py-1 bg-cp-success/20 text-cp-success text-sm rounded-lg hover:bg-cp-success/30 flex items-center gap-1.5 transition-colors">
+                        <i data-lucide="play" class="w-3.5 h-3.5"></i> Run
+                    </button>
+                    <button onclick="askAIAboutCode()" class="px-3 py-1 bg-cp-accent/20 text-cp-accent text-sm rounded-lg hover:bg-cp-accent/30 flex items-center gap-1.5 transition-colors">
+                        <i data-lucide="sparkles" class="w-3.5 h-3.5"></i> Ask AI
+                    </button>
+                </div>
+                <div class="flex-1 flex">
+                    <div id="monaco-container" class="flex-1"></div>
+                </div>
+                <div id="ide-output" class="h-48 bg-cp-bg border-t border-cp-border overflow-y-auto p-3 font-mono text-sm hidden">
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="text-cp-muted text-xs uppercase tracking-wide">Output</span>
+                        <button onclick="clearOutput()" class="text-cp-muted hover:text-cp-text text-xs">Clear</button>
+                    </div>
+                    <pre id="ide-output-content" class="text-cp-text whitespace-pre-wrap"></pre>
+                </div>
+            </div>
+
+            <!-- Wiki Panel -->
+            <div id="panel-wiki" class="flex-1 flex flex-col hidden">
+                <!-- Wiki viewer -->
+                <div id="wiki-viewer" class="flex-1 overflow-y-auto p-6">
+                    <div id="wiki-welcome" class="text-center py-20">
+                        <i data-lucide="book-open" class="w-16 h-16 mx-auto text-cp-muted mb-4"></i>
+                        <h2 class="text-xl font-semibold mb-2">Knowledge Base</h2>
+                        <p class="text-cp-muted text-sm max-w-md mx-auto">Create articles to build your local knowledge base. Articles are indexed for semantic search and used as context in chat via RAG.</p>
+                    </div>
+                    <div id="wiki-article-view" class="hidden max-w-3xl mx-auto">
+                        <div class="flex items-center justify-between mb-4">
+                            <h1 id="wiki-view-title" class="text-2xl font-bold"></h1>
+                            <div class="flex gap-2">
+                                <button onclick="editCurrentArticle()" class="px-3 py-1 text-sm bg-cp-surface2 rounded-lg hover:bg-cp-border flex items-center gap-1.5">
+                                    <i data-lucide="edit-2" class="w-3.5 h-3.5"></i> Edit
+                                </button>
+                                <button onclick="deleteCurrentArticle()" class="px-3 py-1 text-sm bg-cp-error/20 text-cp-error rounded-lg hover:bg-cp-error/30 flex items-center gap-1.5">
+                                    <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div id="wiki-view-tags" class="flex gap-1 mb-4"></div>
+                        <div id="wiki-view-content" class="wiki-content text-cp-text leading-relaxed"></div>
+                    </div>
+                </div>
+                <!-- Wiki editor (hidden by default) -->
+                <div id="wiki-editor" class="flex-1 flex flex-col hidden">
+                    <div class="p-4 border-b border-cp-border bg-cp-surface flex items-center gap-3">
+                        <input type="text" id="wiki-edit-title" placeholder="Article title..."
+                            class="flex-1 px-3 py-2 bg-cp-bg border border-cp-border rounded-lg text-sm text-cp-text focus:border-cp-accent focus:outline-none">
+                        <input type="text" id="wiki-edit-tags" placeholder="Tags (comma-separated)"
+                            class="w-48 px-3 py-2 bg-cp-bg border border-cp-border rounded-lg text-sm text-cp-text focus:border-cp-accent focus:outline-none">
+                        <button onclick="saveWikiArticle()" class="px-4 py-2 bg-cp-accent text-white text-sm rounded-lg hover:bg-cp-accent/80">Save</button>
+                        <button onclick="cancelWikiEdit()" class="px-4 py-2 bg-cp-surface2 text-cp-text text-sm rounded-lg hover:bg-cp-border">Cancel</button>
+                    </div>
+                    <textarea id="wiki-edit-content" placeholder="Write your article in Markdown..."
+                        class="flex-1 p-4 bg-cp-bg text-cp-text text-sm font-mono resize-none focus:outline-none"></textarea>
+                </div>
+            </div>
+
+            <!-- GitHub Panel -->
+            <div id="panel-github" class="flex-1 flex flex-col hidden">
+                <div id="github-content" class="flex-1 overflow-y-auto p-6">
+                    <div id="github-welcome" class="text-center py-20">
+                        <i data-lucide="github" class="w-16 h-16 mx-auto text-cp-muted mb-4"></i>
+                        <h2 class="text-xl font-semibold mb-2">GitHub Repos</h2>
+                        <p class="text-cp-muted text-sm max-w-md mx-auto mb-6">Clone repos, browse code, and index Python files into your knowledge base for RAG-enhanced chat.</p>
+                        <button onclick="showCloneModal()" class="px-4 py-2 bg-cp-accent text-white text-sm rounded-lg hover:bg-cp-accent/80 inline-flex items-center gap-2">
+                            <i data-lucide="git-branch" class="w-4 h-4"></i> Clone a Repository
+                        </button>
+                    </div>
+                    <div id="github-repo-view" class="hidden max-w-4xl mx-auto">
+                        <div class="flex items-center gap-3 mb-4">
+                            <button onclick="githubBack()" class="p-1.5 rounded hover:bg-cp-surface2">
+                                <i data-lucide="arrow-left" class="w-4 h-4"></i>
+                            </button>
+                            <h2 id="github-repo-name" class="text-lg font-semibold"></h2>
+                            <span id="github-repo-path" class="text-sm text-cp-muted"></span>
+                            <div class="flex-1"></div>
+                            <button onclick="indexCurrentRepo()" class="px-3 py-1.5 bg-cp-accent/20 text-cp-accent text-sm rounded-lg hover:bg-cp-accent/30 flex items-center gap-1.5">
+                                <i data-lucide="brain" class="w-3.5 h-3.5"></i> Index for RAG
+                            </button>
+                            <button onclick="pullCurrentRepo()" class="px-3 py-1.5 bg-cp-surface2 text-sm rounded-lg hover:bg-cp-border flex items-center gap-1.5">
+                                <i data-lucide="download" class="w-3.5 h-3.5"></i> Pull
+                            </button>
+                        </div>
+                        <div id="github-file-browser" class="border border-cp-border rounded-lg overflow-hidden"></div>
+                        <div id="github-file-content" class="mt-4 hidden">
+                            <div class="flex items-center justify-between mb-2">
+                                <span id="github-file-name" class="text-sm font-mono text-cp-muted"></span>
+                                <button onclick="openInEditor()" class="text-sm text-cp-accent hover:underline">Open in IDE</button>
+                            </div>
+                            <pre class="bg-cp-bg border border-cp-border rounded-lg p-4 overflow-x-auto"><code id="github-file-code" class="text-sm"></code></pre>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Notes (Joplin) Panel -->
+            <div id="panel-notes" class="flex-1 flex flex-col hidden">
+                <!-- Note viewer -->
+                <div id="notes-viewer" class="flex-1 overflow-y-auto p-6">
+                    <div id="notes-welcome" class="text-center py-20">
+                        <i data-lucide="notebook-pen" class="w-16 h-16 mx-auto text-cp-muted mb-4"></i>
+                        <h2 class="text-xl font-semibold mb-2">Joplin Notes</h2>
+                        <p class="text-cp-muted text-sm max-w-md mx-auto mb-4">Connect to Joplin for AI-powered note-taking. Your notes are searchable by the agent and can sync with the wiki.</p>
+                        <div id="joplin-setup" class="max-w-sm mx-auto space-y-3">
+                            <p class="text-xs text-cp-muted">Enter your Joplin API token (found in Joplin → Settings → Web Clipper):</p>
+                            <div class="flex gap-2">
+                                <input type="password" id="joplin-token-quick" placeholder="Joplin API token..."
+                                    class="flex-1 px-3 py-2 bg-cp-bg border border-cp-border rounded-lg text-sm text-cp-text focus:border-cp-accent focus:outline-none">
+                                <button onclick="saveJoplinToken(document.getElementById('joplin-token-quick').value)" class="px-4 py-2 bg-cp-accent text-white text-sm rounded-lg hover:bg-cp-accent/80">Connect</button>
+                            </div>
+                            <p id="joplin-connect-status" class="text-xs text-cp-muted"></p>
+                        </div>
+                    </div>
+                    <div id="notes-note-view" class="hidden max-w-3xl mx-auto">
+                        <div class="flex items-center justify-between mb-4">
+                            <h1 id="note-view-title" class="text-2xl font-bold"></h1>
+                            <div class="flex gap-2">
+                                <button onclick="editCurrentNote()" class="px-3 py-1 text-sm bg-cp-surface2 rounded-lg hover:bg-cp-border flex items-center gap-1.5">
+                                    <i data-lucide="edit-2" class="w-3.5 h-3.5"></i> Edit
+                                </button>
+                                <button onclick="syncNoteToWiki()" class="px-3 py-1 text-sm bg-cp-accent/20 text-cp-accent rounded-lg hover:bg-cp-accent/30 flex items-center gap-1.5">
+                                    <i data-lucide="arrow-right-left" class="w-3.5 h-3.5"></i> To Wiki
+                                </button>
+                                <button onclick="askAIAboutNote()" class="px-3 py-1 text-sm bg-cp-success/20 text-cp-success rounded-lg hover:bg-cp-success/30 flex items-center gap-1.5">
+                                    <i data-lucide="sparkles" class="w-3.5 h-3.5"></i> Ask AI
+                                </button>
+                                <button onclick="deleteCurrentNote()" class="px-3 py-1 text-sm bg-cp-error/20 text-cp-error rounded-lg hover:bg-cp-error/30">
+                                    <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div id="note-view-tags" class="flex gap-1 mb-4"></div>
+                        <div id="note-view-content" class="wiki-content text-cp-text leading-relaxed"></div>
+                    </div>
+                </div>
+                <!-- Note editor -->
+                <div id="notes-editor" class="flex-1 flex flex-col hidden">
+                    <div class="p-4 border-b border-cp-border bg-cp-surface flex items-center gap-3">
+                        <input type="text" id="note-edit-title" placeholder="Note title..."
+                            class="flex-1 px-3 py-2 bg-cp-bg border border-cp-border rounded-lg text-sm text-cp-text focus:border-cp-accent focus:outline-none">
+                        <select id="note-edit-notebook" class="w-48 px-3 py-2 bg-cp-bg border border-cp-border rounded-lg text-sm text-cp-text focus:border-cp-accent focus:outline-none">
+                            <option value="">Default notebook</option>
+                        </select>
+                        <button onclick="saveJoplinNote()" class="px-4 py-2 bg-cp-accent text-white text-sm rounded-lg hover:bg-cp-accent/80">Save</button>
+                        <button onclick="cancelNoteEdit()" class="px-4 py-2 bg-cp-surface2 text-cp-text text-sm rounded-lg hover:bg-cp-border">Cancel</button>
+                    </div>
+                    <textarea id="note-edit-body" placeholder="Write your note in Markdown..."
+                        class="flex-1 p-4 bg-cp-bg text-cp-text text-sm font-mono resize-none focus:outline-none"></textarea>
+                </div>
+            </div>
+
+            <!-- Settings Panel -->
+            <div id="panel-settings" class="flex-1 overflow-y-auto p-6 hidden">
+                <div class="max-w-2xl mx-auto space-y-6">
+                    <h2 class="text-xl font-semibold">Settings</h2>
+
+                    <!-- Hardware -->
+                    <div class="bg-cp-surface border border-cp-border rounded-xl p-5">
+                        <h3 class="font-semibold mb-3 flex items-center gap-2"><i data-lucide="cpu" class="w-4 h-4 text-cp-accent"></i> Hardware</h3>
+                        <div id="hardware-info" class="grid grid-cols-2 gap-3 text-sm"></div>
+                    </div>
+
+                    <!-- Model -->
+                    <div class="bg-cp-surface border border-cp-border rounded-xl p-5">
+                        <h3 class="font-semibold mb-3 flex items-center gap-2"><i data-lucide="brain" class="w-4 h-4 text-cp-accent"></i> AI Model</h3>
+                        <div class="flex gap-2 mb-3">
+                            <select id="model-select" class="flex-1 px-3 py-2 bg-cp-bg border border-cp-border rounded-lg text-sm text-cp-text focus:border-cp-accent focus:outline-none">
+                                <option>Loading models...</option>
+                            </select>
+                            <button onclick="switchModel()" class="px-4 py-2 bg-cp-accent text-white text-sm rounded-lg hover:bg-cp-accent/80">Switch</button>
+                        </div>
+                        <div class="flex gap-2">
+                            <input type="text" id="pull-model-name" placeholder="Model name to pull (e.g. qwen2.5-coder:3b)"
+                                class="flex-1 px-3 py-2 bg-cp-bg border border-cp-border rounded-lg text-sm text-cp-text focus:border-cp-accent focus:outline-none">
+                            <button onclick="pullNewModel()" class="px-4 py-2 bg-cp-surface2 text-sm rounded-lg hover:bg-cp-border">Pull</button>
+                        </div>
+                        <div id="pull-progress" class="mt-2 text-xs text-cp-muted hidden"></div>
+                    </div>
+
+                    <!-- GitHub Token -->
+                    <div class="bg-cp-surface border border-cp-border rounded-xl p-5">
+                        <h3 class="font-semibold mb-3 flex items-center gap-2"><i data-lucide="key" class="w-4 h-4 text-cp-accent"></i> GitHub Token</h3>
+                        <div class="flex gap-2">
+                            <input type="password" id="github-token-input" placeholder="ghp_xxxxxxxxxxxx"
+                                class="flex-1 px-3 py-2 bg-cp-bg border border-cp-border rounded-lg text-sm text-cp-text focus:border-cp-accent focus:outline-none">
+                            <button onclick="saveGitHubToken()" class="px-4 py-2 bg-cp-accent text-white text-sm rounded-lg hover:bg-cp-accent/80">Save</button>
+                        </div>
+                        <p id="github-auth-status" class="mt-2 text-xs text-cp-muted"></p>
+                    </div>
+
+                    <!-- Knowledge Base -->
+                    <div class="bg-cp-surface border border-cp-border rounded-xl p-5">
+                        <h3 class="font-semibold mb-3 flex items-center gap-2"><i data-lucide="database" class="w-4 h-4 text-cp-accent"></i> Knowledge Base</h3>
+                        <div id="kb-stats" class="text-sm text-cp-muted mb-3"></div>
+                        <button onclick="reindexWiki()" class="px-4 py-2 bg-cp-surface2 text-sm rounded-lg hover:bg-cp-border">Re-index Wiki</button>
+                    </div>
+                </div>
+            </div>
+
+        </main>
+    </div>
+
+    <!-- ═══ Clone Modal ═══ -->
+    <div id="clone-modal" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 hidden">
+        <div class="bg-cp-surface border border-cp-border rounded-xl w-[500px] p-6">
+            <h3 class="text-lg font-semibold mb-4">Clone Repository</h3>
+            <div class="space-y-3">
+                <input type="text" id="clone-url" placeholder="https://github.com/user/repo.git"
+                    class="w-full px-3 py-2 bg-cp-bg border border-cp-border rounded-lg text-sm text-cp-text focus:border-cp-accent focus:outline-none">
+                <input type="text" id="clone-name" placeholder="Custom folder name (optional)"
+                    class="w-full px-3 py-2 bg-cp-bg border border-cp-border rounded-lg text-sm text-cp-text focus:border-cp-accent focus:outline-none">
+            </div>
+            <div class="flex justify-end gap-2 mt-4">
+                <button onclick="hideCloneModal()" class="px-4 py-2 bg-cp-surface2 text-sm rounded-lg hover:bg-cp-border">Cancel</button>
+                <button onclick="cloneRepo()" class="px-4 py-2 bg-cp-accent text-white text-sm rounded-lg hover:bg-cp-accent/80">Clone</button>
+            </div>
+            <p id="clone-status" class="mt-2 text-xs text-cp-muted"></p>
+        </div>
+    </div>
+
+    <!-- ═══ Toast ═══ -->
+    <div id="toast-container" class="fixed bottom-4 right-4 z-50 space-y-2"></div>
+
+    <!-- Monaco loader -->
+    <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.47.0/min/vs/loader.js"></script>
+
+    <!-- App Script -->
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
