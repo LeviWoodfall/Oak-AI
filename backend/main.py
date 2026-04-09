@@ -34,6 +34,7 @@ from backend.agent.tiered_context import tiered_context
 from backend.agent.auto_learner import auto_learner
 from backend.agent.fact_checker import fact_checker
 from backend.agent.self_maintenance import self_maintenance
+from backend.agent.skill_library import skill_library
 from backend.whisper_service import whisper_service
 from backend.onenote_service import onenote_service
 
@@ -700,6 +701,79 @@ async def maintenance_run_now():
 @app.get("/api/maintenance/reports")
 async def maintenance_reports(limit: int = 10):
     return {"reports": self_maintenance.get_reports(limit)}
+
+
+# ── Skill Library (Memento-inspired) ──────────────────────────────────
+
+@app.get("/api/skill-library/stats")
+async def skill_library_stats():
+    return skill_library.stats()
+
+@app.get("/api/skill-library/skills")
+async def skill_library_list(category: Optional[str] = None,
+                             source: Optional[str] = None,
+                             status: Optional[str] = None):
+    return {"skills": skill_library.list_all(category=category, source=source, status=status)}
+
+@app.get("/api/skill-library/leaderboard")
+async def skill_library_leaderboard(limit: int = 20):
+    return {"leaderboard": skill_library.get_leaderboard(limit)}
+
+@app.get("/api/skill-library/evolution")
+async def skill_library_evolution(skill_id: Optional[str] = None, limit: int = 50):
+    return {"history": skill_library.get_evolution_history(skill_id=skill_id, limit=limit)}
+
+@app.get("/api/skill-library/route")
+async def skill_library_route(task: str = Query(...), n: int = 3):
+    routed = skill_library.route(task, max_results=n)
+    return {"skills": [s.to_dict() for s in routed]}
+
+@app.get("/api/skill-library/skill/{skill_id}")
+async def skill_library_get(skill_id: str):
+    skill = skill_library.get(skill_id)
+    if not skill:
+        raise HTTPException(404, "Skill not found")
+    return skill.to_dict()
+
+class AddSkillRequest(BaseModel):
+    name: str
+    description: str
+    content: str
+    category: str = "general"
+    tags: list[str] = []
+    tools: list[str] = []
+    trigger: str = ""
+
+@app.post("/api/skill-library/skills")
+async def skill_library_add(req: AddSkillRequest):
+    entry = skill_library.add_skill(
+        name=req.name, description=req.description, content=req.content,
+        category=req.category, source="user", tags=req.tags,
+        tools=req.tools, trigger=req.trigger,
+    )
+    return entry.to_dict()
+
+@app.delete("/api/skill-library/skill/{skill_id}")
+async def skill_library_remove(skill_id: str):
+    if skill_library.remove(skill_id):
+        return {"status": "removed"}
+    raise HTTPException(404, "Skill not found or is builtin")
+
+@app.get("/api/skill-library/optimizing")
+async def skill_library_optimizing():
+    skills = skill_library.get_skills_needing_optimization()
+    return {"skills": [s.to_dict() for s in skills]}
+
+@app.post("/api/skill-library/optimize/{skill_id}")
+async def skill_library_optimize(skill_id: str):
+    skill = skill_library.get(skill_id)
+    if not skill:
+        raise HTTPException(404, "Skill not found")
+    improved = await skill_library.reflect_and_improve(
+        skill_id, task="Manual optimization request", error="Low utility score")
+    if improved:
+        return improved.to_dict()
+    raise HTTPException(500, "Optimization failed")
 
 
 # ── Tiered Context ───────────────────────────────────────────────────

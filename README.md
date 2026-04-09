@@ -33,6 +33,14 @@ Like Claude Code, Windsurf, or Cursor — but local, self-improving, and yours.
 - **Fact Checker (2x frequency)** — Cross-references wiki claims against live GitHub API, detects contradictions in memory, flags stale context. Runs every 12h (twice as often as learning).
 - **Self-Maintenance (every 6h)** — Syntax verification, dependency audits, endpoint health checks, memory integrity, storage cleanup, self-tests, documentation freshness. Outputs a health score 0-100%.
 
+### Skill Library (Memento-inspired Read→Execute→Reflect→Write)
+- **Unified Skill Gateway** — Merges builtin SKILL.md skills, learned skills from repos, and AI-generated skills into one library with utility scoring and version tracking.
+- **Hybrid Skill Routing** — Finds the best skill for any task using semantic vectors (ChromaDB) + keyword matching (BM25-like) + utility weighting.
+- **Utility Scoring** — Every skill has a utility score 0-100 that rises on success (+10) and drops on failure (-15). Skills below 30 are flagged for optimization; below 10 are retired.
+- **Reflect→Write Loop** — When a skill fails, Oak reflects on *why* using the LLM, generates an improved version, and writes it back. Skills evolve through versioning.
+- **Content Analyzer** — Quality checks on all skills before storage (structure, code examples, tags, description).
+- **Skill Leaderboard** — Rankings by utility score and success rate across all skills.
+
 ### Workflow Automation
 - **Define workflows** — JSON step sequences chaining agent tools together.
 - **4 Built-in Templates** — Git summary, code quality, research & document, wiki backup.

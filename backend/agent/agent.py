@@ -15,6 +15,7 @@ from backend.llm_service import llm_service
 from backend.agent.tools import ToolRegistry
 from backend.agent.memory import agent_memory
 from backend.agent.skills import skill_loader
+from backend.agent.skill_library import skill_library
 
 logger = logging.getLogger("oak.agent")
 
@@ -31,8 +32,11 @@ class AgentState:
         self.tool_calls: list[dict] = []
         self.tool_results: list[dict] = []
         self.active_skill: Optional[str] = None
+        self.active_skill_id: Optional[str] = None  # skill_library ID for reflect-write
         self.plan: list[str] = []
         self.status: str = "thinking"
+        self.had_errors: bool = False
+        self.last_error: str = ""
 
 
 class CodingAgent:
@@ -117,22 +121,40 @@ and can decide to call more tools or respond to the user.
         # Check for slash command skills
         last_user_msg = messages[-1]["content"] if messages else ""
         skill_prompt = ""
+
+        # 1. Try skill_library hybrid routing first (Memento pattern)
         if last_user_msg.startswith("/"):
             trigger = last_user_msg.split()[0]
-            skill = skill_loader.find_by_trigger(trigger)
-            if skill:
-                state.active_skill = skill.slug
-                skill_prompt = skill.to_prompt()
-                yield {"type": "status", "status": f"Activating skill: {skill.title}"}
+            lib_skill = skill_library.get_by_trigger(trigger)
+            if lib_skill:
+                state.active_skill = lib_skill.name
+                state.active_skill_id = lib_skill.skill_id
+                skill_prompt = lib_skill.to_prompt()
+                yield {"type": "status", "status": f"Activating skill: {lib_skill.name} (utility: {lib_skill.utility})"}
 
-        # Progressive skill loading — find relevant skills for the task
+        # 2. Hybrid route: semantic + keyword + utility scoring
         if not skill_prompt:
-            relevant_skills = skill_loader.find_relevant(last_user_msg, max_skills=2)
-            if relevant_skills:
-                skill_prompt = "\n\n".join(
-                    f"## Available Skill: {s.title}\n{s.description}"
-                    for s in relevant_skills
-                )
+            routed = skill_library.route(last_user_msg, max_results=2)
+            if routed:
+                state.active_skill_id = routed[0].skill_id
+                state.active_skill = routed[0].name
+                skill_prompt = "\n\n".join(s.to_prompt() for s in routed)
+
+        # 3. Fallback to legacy skill_loader if library is empty
+        if not skill_prompt:
+            if last_user_msg.startswith("/"):
+                trigger = last_user_msg.split()[0]
+                skill = skill_loader.find_by_trigger(trigger)
+                if skill:
+                    state.active_skill = skill.slug
+                    skill_prompt = skill.to_prompt()
+            if not skill_prompt:
+                relevant_skills = skill_loader.find_relevant(last_user_msg, max_skills=2)
+                if relevant_skills:
+                    skill_prompt = "\n\n".join(
+                        f"## Available Skill: {s.title}\n{s.description}"
+                        for s in relevant_skills
+                    )
 
         # RAG context
         context_docs = []
@@ -203,6 +225,8 @@ and can decide to call more tools or respond to the user.
                     error_result = f"Tool call failed: {e}"
                     yield {"type": "tool_result", "tool": "error", "result": error_result}
                     result_text = error_result
+                    state.had_errors = True
+                    state.last_error = str(e)
 
             # Add tool results to conversation for next round
             tool_summary = "\n".join(
@@ -216,10 +240,33 @@ and can decide to call more tools or respond to the user.
         # Extract memory from conversation
         await self._extract_memory(last_user_msg, full_response, state)
 
+        # Memento Reflect→Write loop: record skill execution & improve on failure
+        if state.active_skill_id:
+            success = not state.had_errors
+            skill_library.record_execution(
+                state.active_skill_id, success=success,
+                task=last_user_msg[:200],
+                error=state.last_error[:200] if state.last_error else "",
+            )
+            # If skill failed, attempt automatic improvement
+            if not success:
+                try:
+                    improved = await skill_library.reflect_and_improve(
+                        state.active_skill_id,
+                        task=last_user_msg[:500],
+                        error=state.last_error[:500],
+                    )
+                    if improved:
+                        yield {"type": "status",
+                               "status": f"Improved skill '{improved.name}' → v{improved.version}"}
+                except Exception as e:
+                    logger.warning("Skill improvement failed: %s", e)
+
         yield {
             "type": "done",
             "tool_calls": [tc for tc in state.tool_calls],
             "skill_used": state.active_skill,
+            "skill_id": state.active_skill_id,
         }
 
     async def _extract_memory(self, user_msg: str, response: str, state: AgentState):

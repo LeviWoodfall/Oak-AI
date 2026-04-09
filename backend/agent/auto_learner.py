@@ -569,6 +569,19 @@ class AutoLearner:
                 if skills:
                     result["skills_learned"] = len(skills)
                     logger.info("Extracted %d skills from %s", len(skills), name)
+
+                    # Feed into unified skill library (Memento pattern)
+                    from backend.agent.skill_library import skill_library
+                    for skill in skills:
+                        skill_library.add_skill(
+                            name=skill.name,
+                            description=skill.description,
+                            content=skill.code_example,
+                            category=skill.category,
+                            source="learned",
+                            tags=skill.tags,
+                            source_repo=name,
+                        )
             except Exception as e:
                 logger.warning("Failed to extract skills from %s: %s", name, e)
 
