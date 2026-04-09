@@ -90,6 +90,10 @@ class Settings(BaseSettings):
     # GitHub
     github_token: str = Field(default="", alias="GITHUB_TOKEN")
 
+    # Joplin
+    joplin_token: str = Field(default="", alias="JOPLIN_TOKEN")
+    joplin_url: str = Field(default="http://localhost:41184", alias="JOPLIN_URL")
+
     # Embedding model (runs locally via sentence-transformers)
     embedding_model: str = "all-MiniLM-L6-v2"
 

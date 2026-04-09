@@ -53,7 +53,7 @@ app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 async def startup_event():
     """Auto-start the scheduler with autonomous learning on server boot."""
     workflow_scheduler.start()
-    logger.info("Autonomous systems armed: learn(24h) + fact-check(12h) + maintenance(6h)")
+    logger.info("Autonomous systems armed: learn(24h, 5-pass comprehensive) + fact-check(12h) + maintenance(6h)")
 
 
 # ── Request models ───────────────────────────────────────────────────
@@ -833,6 +833,78 @@ async def onenote_save_chat_summary(conv_id: str):
     summary = "\n\n---\n\n".join(summary_parts)
     result = await onenote_service.save_chat_summary(conv["title"], summary)
     return {"status": "saved", "page_id": result.get("id", "")}
+
+
+# ── Joplin ─────────────────────────────────────────────────────────────
+
+from backend.joplin_service import joplin_service
+
+@app.get("/api/joplin/ping")
+async def joplin_ping():
+    return await joplin_service.ping()
+
+class JoplinToken(BaseModel):
+    token: str
+
+@app.post("/api/joplin/token")
+async def joplin_set_token(req: JoplinToken):
+    joplin_service.set_token(req.token)
+    return {"success": True}
+
+@app.get("/api/joplin/notebooks")
+async def joplin_notebooks():
+    return {"notebooks": await joplin_service.list_notebooks()}
+
+@app.get("/api/joplin/notebooks/{notebook_id}/notes")
+async def joplin_notebook_notes(notebook_id: str):
+    return {"notes": await joplin_service.get_notebook_notes(notebook_id)}
+
+@app.get("/api/joplin/notes")
+async def joplin_notes(limit: int = 50):
+    return {"notes": await joplin_service.list_notes(limit)}
+
+@app.get("/api/joplin/notes/{note_id}")
+async def joplin_get_note(note_id: str):
+    note = await joplin_service.get_note(note_id)
+    if not note:
+        raise HTTPException(404, "Note not found")
+    return note
+
+class JoplinNoteCreate(BaseModel):
+    title: str
+    body: str
+    notebook_id: str = ""
+    tags: list[str] = []
+
+@app.post("/api/joplin/notes")
+async def joplin_create_note(req: JoplinNoteCreate):
+    note = await joplin_service.create_note(req.title, req.body, req.notebook_id, req.tags)
+    return note
+
+@app.delete("/api/joplin/notes/{note_id}")
+async def joplin_delete_note(note_id: str):
+    if await joplin_service.delete_note(note_id):
+        return {"status": "deleted"}
+    raise HTTPException(404, "Note not found")
+
+@app.get("/api/joplin/search")
+async def joplin_search(q: str = Query(...), limit: int = 20):
+    return {"notes": await joplin_service.search_notes(q, limit)}
+
+# Joplin ↔ Wiki sync
+@app.post("/api/joplin/notes/{note_id}/to-wiki")
+async def joplin_note_to_wiki(note_id: str):
+    article = await joplin_service.sync_note_to_wiki(note_id)
+    if not article:
+        raise HTTPException(404, "Note not found")
+    return {"status": "synced", "slug": article["slug"]}
+
+@app.post("/api/joplin/wiki/{wiki_slug}/to-joplin")
+async def wiki_to_joplin(wiki_slug: str, notebook_id: str = ""):
+    result = await joplin_service.sync_wiki_to_note(wiki_slug, notebook_id)
+    if not result:
+        raise HTTPException(404, "Wiki article not found")
+    return {"status": "synced", "note_id": result.get("id", "")}
 
 
 # ── Run ──────────────────────────────────────────────────────────────

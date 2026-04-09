@@ -22,8 +22,8 @@ class JoplinService:
     """Client for the Joplin Data API (REST, localhost:41184)."""
 
     def __init__(self):
-        self._base_url = os.environ.get("JOPLIN_URL", "http://localhost:41184")
-        self._token = os.environ.get("JOPLIN_TOKEN", "")
+        self._base_url = settings.joplin_url
+        self._token = settings.joplin_token
         self._client = httpx.AsyncClient(timeout=15)
 
     @property

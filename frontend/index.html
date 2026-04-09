@@ -73,11 +73,19 @@
         @keyframes blink { 0%, 80%, 100% { opacity: 0; } 40% { opacity: 1; } }
 
         /* Tab active state */
-        .tab-active { border-bottom: 2px solid #6c63ff; color: #6c63ff; }
+        .tab-active { border-bottom: 2px solid #6c63ff; color: #6c63ff; background: #1a1d2750; }
+        .tab-inactive:hover { background: #232734; }
 
         /* Sidebar item hover */
         .sidebar-item:hover { background: #232734; }
         .sidebar-item.active { background: #232734; border-right: 2px solid #6c63ff; }
+
+        /* Sidebar scrollable areas */
+        .sidebar-scroll { overflow-y: auto; overflow-x: hidden; }
+        .sidebar-scroll::-webkit-scrollbar { width: 4px; }
+        .sidebar-scroll::-webkit-scrollbar-track { background: transparent; }
+        .sidebar-scroll::-webkit-scrollbar-thumb { background: #3d4460; border-radius: 2px; }
+        .sidebar-scroll::-webkit-scrollbar-thumb:hover { background: #6c63ff; }
 
         /* Monaco container */
         #monaco-container { width: 100%; height: 100%; }
@@ -108,22 +116,22 @@
             <span id="status-badge" class="text-xs px-2 py-0.5 rounded-full bg-cp-surface2 text-cp-muted">checking...</span>
         </div>
         <nav class="flex items-center gap-1">
-            <button onclick="switchTab('chat')" id="tab-chat" class="tab-active px-3 py-2 text-sm font-medium flex items-center gap-1.5 border-b-2 border-transparent transition-colors">
+            <button onclick="switchTab('chat')" id="tab-chat" class="tab-active px-3 py-2 text-sm font-medium flex items-center gap-1.5 border-b-2 border-transparent transition-colors rounded-t-lg">
                 <i data-lucide="message-square" class="w-4 h-4"></i> Chat
             </button>
-            <button onclick="switchTab('ide')" id="tab-ide" class="px-3 py-2 text-sm font-medium flex items-center gap-1.5 border-b-2 border-transparent transition-colors text-cp-muted hover:text-cp-text">
+            <button onclick="switchTab('ide')" id="tab-ide" class="tab-inactive px-3 py-2 text-sm font-medium flex items-center gap-1.5 border-b-2 border-transparent transition-colors text-cp-muted hover:text-cp-text rounded-t-lg">
                 <i data-lucide="code-2" class="w-4 h-4"></i> IDE
             </button>
-            <button onclick="switchTab('wiki')" id="tab-wiki" class="px-3 py-2 text-sm font-medium flex items-center gap-1.5 border-b-2 border-transparent transition-colors text-cp-muted hover:text-cp-text">
+            <button onclick="switchTab('wiki')" id="tab-wiki" class="tab-inactive px-3 py-2 text-sm font-medium flex items-center gap-1.5 border-b-2 border-transparent transition-colors text-cp-muted hover:text-cp-text rounded-t-lg">
                 <i data-lucide="book-open" class="w-4 h-4"></i> Wiki
             </button>
-            <button onclick="switchTab('notes')" id="tab-notes" class="px-3 py-2 text-sm font-medium flex items-center gap-1.5 border-b-2 border-transparent transition-colors text-cp-muted hover:text-cp-text">
+            <button onclick="switchTab('notes')" id="tab-notes" class="tab-inactive px-3 py-2 text-sm font-medium flex items-center gap-1.5 border-b-2 border-transparent transition-colors text-cp-muted hover:text-cp-text rounded-t-lg">
                 <i data-lucide="notebook-pen" class="w-4 h-4"></i> Notes
             </button>
-            <button onclick="switchTab('github')" id="tab-github" class="px-3 py-2 text-sm font-medium flex items-center gap-1.5 border-b-2 border-transparent transition-colors text-cp-muted hover:text-cp-text">
+            <button onclick="switchTab('github')" id="tab-github" class="tab-inactive px-3 py-2 text-sm font-medium flex items-center gap-1.5 border-b-2 border-transparent transition-colors text-cp-muted hover:text-cp-text rounded-t-lg">
                 <i data-lucide="github" class="w-4 h-4"></i> GitHub
             </button>
-            <button onclick="switchTab('settings')" id="tab-settings" class="px-3 py-2 text-sm font-medium flex items-center gap-1.5 border-b-2 border-transparent transition-colors text-cp-muted hover:text-cp-text">
+            <button onclick="switchTab('settings')" id="tab-settings" class="tab-inactive px-3 py-2 text-sm font-medium flex items-center gap-1.5 border-b-2 border-transparent transition-colors text-cp-muted hover:text-cp-text rounded-t-lg">
                 <i data-lucide="settings" class="w-4 h-4"></i>
             </button>
         </nav>
@@ -135,60 +143,66 @@
         <!-- ── Sidebar ── -->
         <aside id="sidebar" class="w-60 bg-cp-surface border-r border-cp-border flex flex-col flex-shrink-0">
             <!-- Chat sidebar (default) -->
-            <div id="sidebar-chat" class="flex flex-col flex-1">
-                <div class="p-3 border-b border-cp-border">
+            <div id="sidebar-chat" class="flex flex-col flex-1 h-full">
+                <div class="p-3 border-b border-cp-border flex-shrink-0">
+                    <div class="text-xs text-cp-muted uppercase tracking-wide mb-2">Conversations</div>
                     <button onclick="newConversation()" class="w-full py-2 px-3 bg-cp-accent hover:bg-cp-accent/80 text-white text-sm rounded-lg flex items-center justify-center gap-2 transition-colors">
                         <i data-lucide="plus" class="w-4 h-4"></i> New Chat
                     </button>
                 </div>
-                <div id="conversation-list" class="flex-1 overflow-y-auto p-2 space-y-1"></div>
+                <div id="conversation-list" class="sidebar-scroll flex-1 p-2 space-y-1"></div>
             </div>
             <!-- Wiki sidebar -->
-            <div id="sidebar-wiki" class="flex flex-col flex-1 hidden">
-                <div class="p-3 border-b border-cp-border">
+            <div id="sidebar-wiki" class="flex flex-col flex-1 h-full hidden">
+                <div class="p-3 border-b border-cp-border flex-shrink-0">
+                    <div class="text-xs text-cp-muted uppercase tracking-wide mb-2">Knowledge Base</div>
                     <button onclick="showWikiEditor()" class="w-full py-2 px-3 bg-cp-accent hover:bg-cp-accent/80 text-white text-sm rounded-lg flex items-center justify-center gap-2 transition-colors">
                         <i data-lucide="plus" class="w-4 h-4"></i> New Article
                     </button>
                 </div>
-                <div class="p-2 border-b border-cp-border">
+                <div class="p-2 border-b border-cp-border flex-shrink-0">
                     <input type="text" id="wiki-search" placeholder="Search wiki..." oninput="searchWiki(this.value)"
                         class="w-full px-3 py-1.5 bg-cp-bg border border-cp-border rounded text-sm text-cp-text placeholder-cp-muted focus:border-cp-accent focus:outline-none">
                 </div>
-                <div id="wiki-article-list" class="flex-1 overflow-y-auto p-2 space-y-1"></div>
-                <div id="wiki-tags" class="p-2 border-t border-cp-border flex flex-wrap gap-1"></div>
+                <div id="wiki-article-list" class="sidebar-scroll flex-1 p-2 space-y-1"></div>
+                <div id="wiki-tags" class="p-2 border-t border-cp-border flex flex-wrap gap-1 flex-shrink-0">
+                    <div class="text-xs text-cp-muted uppercase tracking-wide w-full mb-1">Tags</div>
+                </div>
             </div>
             <!-- GitHub sidebar -->
-            <div id="sidebar-github" class="flex flex-col flex-1 hidden">
-                <div class="p-3 border-b border-cp-border">
+            <div id="sidebar-github" class="flex flex-col flex-1 h-full hidden">
+                <div class="p-3 border-b border-cp-border flex-shrink-0">
+                    <div class="text-xs text-cp-muted uppercase tracking-wide mb-2">Repositories</div>
                     <button onclick="showCloneModal()" class="w-full py-2 px-3 bg-cp-accent hover:bg-cp-accent/80 text-white text-sm rounded-lg flex items-center justify-center gap-2 transition-colors">
                         <i data-lucide="git-branch" class="w-4 h-4"></i> Clone Repo
                     </button>
                 </div>
-                <div id="local-repo-list" class="flex-1 overflow-y-auto p-2 space-y-1"></div>
+                <div id="local-repo-list" class="sidebar-scroll flex-1 p-2 space-y-1"></div>
             </div>
             <!-- Notes (Joplin) sidebar -->
-            <div id="sidebar-notes" class="flex flex-col flex-1 hidden">
-                <div class="p-3 border-b border-cp-border">
+            <div id="sidebar-notes" class="flex flex-col flex-1 h-full hidden">
+                <div class="p-3 border-b border-cp-border flex-shrink-0">
+                    <div class="text-xs text-cp-muted uppercase tracking-wide mb-2">OneNote</div>
                     <button onclick="showNoteEditor()" class="w-full py-2 px-3 bg-cp-accent hover:bg-cp-accent/80 text-white text-sm rounded-lg flex items-center justify-center gap-2 transition-colors">
                         <i data-lucide="plus" class="w-4 h-4"></i> New Note
                     </button>
                 </div>
-                <div class="p-2 border-b border-cp-border">
+                <div class="p-2 border-b border-cp-border flex-shrink-0">
                     <input type="text" id="notes-search" placeholder="Search notes..." oninput="searchJoplinNotes(this.value)"
                         class="w-full px-3 py-1.5 bg-cp-bg border border-cp-border rounded text-sm text-cp-text placeholder-cp-muted focus:border-cp-accent focus:outline-none">
                 </div>
-                <div class="p-2 border-b border-cp-border">
+                <div class="p-2 border-b border-cp-border flex-shrink-0">
                     <select id="notebook-select" onchange="loadNotebookNotes(this.value)"
                         class="w-full px-2 py-1.5 bg-cp-bg border border-cp-border rounded text-sm text-cp-text focus:border-cp-accent focus:outline-none">
                         <option value="">All Notebooks</option>
                     </select>
                 </div>
-                <div id="notes-list" class="flex-1 overflow-y-auto p-2 space-y-1"></div>
+                <div id="notes-list" class="sidebar-scroll flex-1 p-2 space-y-1"></div>
             </div>
             <!-- IDE sidebar -->
-            <div id="sidebar-ide" class="flex flex-col flex-1 hidden">
-                <div class="p-3 border-b border-cp-border text-xs text-cp-muted uppercase tracking-wide">Files</div>
-                <div id="ide-file-list" class="flex-1 overflow-y-auto p-2 space-y-1"></div>
+            <div id="sidebar-ide" class="flex flex-col flex-1 h-full hidden">
+                <div class="p-3 border-b border-cp-border text-xs text-cp-muted uppercase tracking-wide flex-shrink-0">Files</div>
+                <div id="ide-file-list" class="sidebar-scroll flex-1 p-2 space-y-1"></div>
             </div>
         </aside>
 
@@ -330,12 +344,12 @@
                 <div id="notes-viewer" class="flex-1 overflow-y-auto p-6">
                     <div id="notes-welcome" class="text-center py-20">
                         <i data-lucide="notebook-pen" class="w-16 h-16 mx-auto text-cp-muted mb-4"></i>
-                        <h2 class="text-xl font-semibold mb-2">OneNote</h2>
-                        <p class="text-cp-muted text-sm max-w-md mx-auto mb-4">Connect to Microsoft OneNote for AI-powered note-taking. Your notes are searchable by the agent and can sync with the wiki.</p>
+                        <h2 class="text-xl font-semibold mb-2">Joplin Notes</h2>
+                        <p class="text-cp-muted text-sm max-w-md mx-auto mb-4">Connect to Joplin for AI-powered note-taking. Your notes are searchable by the agent and can sync with the wiki.</p>
                         <div id="joplin-setup" class="max-w-sm mx-auto space-y-3">
-                            <p class="text-xs text-cp-muted">Enter your Azure AD App Client ID (register at <a href="https://portal.azure.com" target="_blank" class="text-cp-accent underline">portal.azure.com</a>):</p>
+                            <p class="text-xs text-cp-muted">Enter your Joplin Web Clipper Token (Joplin Desktop → Tools → Options → Web Clipper):</p>
                             <div class="flex gap-2">
-                                <input type="text" id="joplin-token-quick" placeholder="Azure AD Client ID..."
+                                <input type="text" id="joplin-token-quick" placeholder="Joplin Web Clipper Token..."
                                     class="flex-1 px-3 py-2 bg-cp-bg border border-cp-border rounded-lg text-sm text-cp-text focus:border-cp-accent focus:outline-none">
                                 <button onclick="saveJoplinToken(document.getElementById('joplin-token-quick').value)" class="px-4 py-2 bg-cp-accent text-white text-sm rounded-lg hover:bg-cp-accent/80">Connect</button>
                             </div>

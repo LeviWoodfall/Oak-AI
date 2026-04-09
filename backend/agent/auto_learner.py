@@ -1,23 +1,16 @@
 """
 Autonomous Learning Engine — Oak's growth engine.
-Like a tree absorbing sunlight, Oak absorbs knowledge from the internet daily.
-
-Daily cycle:
-  1. Discover top trending GitHub repos (multiple sources)
-  2. Clone/analyze each repo (README, structure, key patterns)
-  3. Extract knowledge → build wiki articles + ingest into tiered context
-  4. Track processing count per repo (max 3 passes, then skip)
-  5. Log everything to audit trail
-
-The internet is the sun. Oak grows every day.
 """
 import asyncio
+import hashlib
 import json
 import logging
-import hashlib
-import time
+import os
 import re
-from datetime import datetime, timezone
+import shutil
+import subprocess
+import time
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 import httpx
@@ -32,7 +25,7 @@ LEARNING_LOG = LEARNER_DIR / "learning_log.jsonl"
 DAILY_REPORT = LEARNER_DIR / "daily_reports"
 DAILY_REPORT.mkdir(parents=True, exist_ok=True)
 
-MAX_PROCESS_COUNT = 3  # Process each repo up to 3 times, then skip
+MAX_PROCESS_COUNT = 5  # Process each repo up to 5 times for comprehensive learning
 
 
 class RepoTracker:
@@ -56,24 +49,47 @@ class RepoTracker:
         key = self._key(repo_url)
         return self._data.get(key, {}).get("count", 0)
 
-    def should_process(self, repo_url: str) -> bool:
-        return self.get_count(repo_url) < MAX_PROCESS_COUNT
+    def should_process(self, repo_url: str, current_commit: str = "") -> bool:
+        """Check if repo should be processed (either not maxed out or has updates)."""
+        count = self.get_count(repo_url)
+        if count < MAX_PROCESS_COUNT:
+            return True
+        # Even if maxed out, re-process if there are updates
+        if current_commit and self.needs_update(repo_url, current_commit):
+            return True
+        return False
+
+    def reset_for_update(self, repo_url: str):
+        """Reset processing count when repo has been updated."""
+        key = self._key(repo_url)
+        if key in self._data:
+            self._data[key]["count"] = 0
+            self._save()
 
     def record_processing(self, repo_url: str, success: bool, articles_created: int = 0,
-                          facts_extracted: int = 0):
+                          facts_extracted: int = 0, last_commit: str = ""):
         key = self._key(repo_url)
         entry = self._data.get(key, {"count": 0, "url": repo_url, "history": []})
         entry["count"] = entry.get("count", 0) + 1
         entry["last_processed"] = datetime.now(timezone.utc).isoformat()
+        entry["last_commit_seen"] = last_commit
         entry["history"].append({
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "success": success,
             "articles_created": articles_created,
             "facts_extracted": facts_extracted,
             "pass_number": entry["count"],
+            "commit": last_commit,
         })
         self._data[key] = entry
         self._save()
+
+    def needs_update(self, repo_url: str, current_commit: str) -> bool:
+        """Check if repo has been updated since last processing."""
+        key = self._key(repo_url)
+        entry = self._data.get(key, {})
+        last_seen = entry.get("last_commit_seen", "")
+        return last_seen != current_commit
 
     def get_all(self) -> dict:
         return self._data
@@ -82,7 +98,7 @@ class RepoTracker:
         total = len(self._data)
         completed = sum(1 for v in self._data.values() if v.get("count", 0) >= MAX_PROCESS_COUNT)
         in_progress = total - completed
-        return {"total_repos_seen": total, "completed_3x": completed, "in_progress": in_progress}
+        return {"total_repos_seen": total, "completed_5x": completed, "in_progress": in_progress}
 
     @staticmethod
     def _key(url: str) -> str:
@@ -99,7 +115,133 @@ class AutoLearner:
         self._last_run = ""
         self._last_report: dict = {}
 
+    # ── Repo Cloning and Local Analysis ───────────────────────────────
+
+    def _get_clone_dir(self, repo_name: str) -> Path:
+        """Get the local directory for a cloned repo."""
+        safe_name = repo_name.replace("/", "_").replace("\\", "_")
+        return LEARNER_DIR / "repos" / safe_name
+
+    async def _clone_repo(self, repo_name: str) -> Path:
+        """Clone a GitHub repository locally for comprehensive analysis."""
+        clone_dir = self._get_clone_dir(repo_name)
+
+        # Remove existing clone if it exists
+        if clone_dir.exists():
+            shutil.rmtree(clone_dir)
+
+        clone_dir.parent.mkdir(parents=True, exist_ok=True)
+
+        # Construct clone URL with token if available
+        clone_url = f"https://github.com/{repo_name}.git"
+        if settings.github_token:
+            clone_url = f"https://{settings.github_token}@github.com/{repo_name}.git"
+
+        logger.info("Cloning %s to %s", repo_name, clone_dir)
+
+        # Run git clone in a subprocess
+        try:
+            result = subprocess.run(
+                ["git", "clone", "--depth", "1", clone_url, str(clone_dir)],
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minute timeout
+            )
+            if result.returncode != 0:
+                logger.error("Git clone failed for %s: %s", repo_name, result.stderr)
+                raise RuntimeError(f"Git clone failed: {result.stderr}")
+            logger.info("Successfully cloned %s", repo_name)
+            return clone_dir
+        except subprocess.TimeoutExpired:
+            logger.error("Git clone timed out for %s", repo_name)
+            raise
+        except Exception as e:
+            logger.error("Failed to clone %s: %s", repo_name, e)
+            raise
+
+    def _cleanup_repo(self, repo_name: str):
+        """Remove the cloned repository after processing."""
+        clone_dir = self._get_clone_dir(repo_name)
+        if clone_dir.exists():
+            try:
+                shutil.rmtree(clone_dir)
+                logger.info("Cleaned up clone of %s", repo_name)
+            except Exception as e:
+                logger.warning("Failed to cleanup %s: %s", repo_name, e)
+
+    def _walk_repo_files(self, clone_dir: Path, max_files: int = 500) -> dict[str, Path]:
+        """Walk through all files in the cloned repository."""
+        files = {}
+        file_count = 0
+
+        # File extensions to include (source code, configs, docs)
+        include_extensions = {
+            '.py', '.js', '.ts', '.tsx', '.jsx', '.java', '.go', '.rs', '.c', '.cpp', '.h',
+            '.hpp', '.cs', '.php', '.rb', '.swift', '.kt', '.scala', '.dart', '.lua',
+            '.json', '.yaml', '.yml', '.toml', '.xml', '.ini', '.cfg', '.conf',
+            '.md', '.rst', '.txt', '.sh', '.bat', '.ps1', '.dockerfile',
+            '.sql', '.graphql', '.proto', '.thrift'
+        }
+
+        # Directories to skip
+        skip_dirs = {
+            '.git', '__pycache__', 'node_modules', '.venv', 'venv', 'env',
+            'dist', 'build', 'target', 'bin', 'obj', '.next', '.vscode',
+            '.idea', 'coverage', '.pytest_cache', '.mypy_cache'
+        }
+
+        try:
+            for root, dirs, filenames in os.walk(clone_dir):
+                # Skip unwanted directories
+                dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith('.')]
+
+                for filename in filenames:
+                    # Check file extension
+                    ext = Path(filename).suffix.lower()
+                    if ext in include_extensions:
+                        rel_path = Path(root).relative_to(clone_dir) / filename
+                        files[str(rel_path)] = Path(root) / filename
+                        file_count += 1
+
+                        if file_count >= max_files:
+                            logger.info("Reached max file limit (%d) for repo", max_files)
+                            return files
+        except Exception as e:
+            logger.error("Error walking repo files: %s", e)
+
+        logger.info("Found %d files in repo", len(files))
+        return files
+
+    def _read_file_content(self, file_path: Path, max_size: int = 50000) -> str:
+        """Read file content with size limit."""
+        try:
+            if file_path.stat().st_size > max_size:
+                return f"[File too large: {file_path.stat().st_size} bytes]"
+            return file_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception as e:
+            logger.debug("Failed to read %s: %s", file_path, e)
+            return f"[Error reading file: {e}]"
+
     # ── Discovery: Find top repos from multiple sources ───────────────
+
+    async def _fetch_latest_commit(self, repo_name: str) -> str:
+        """Fetch the latest commit SHA from GitHub API."""
+        headers = {"Accept": "application/vnd.github.v3+json"}
+        if settings.github_token:
+            headers["Authorization"] = f"token {settings.github_token}"
+        try:
+            resp = await self._http.get(
+                f"https://api.github.com/repos/{repo_name}/commits",
+                headers=headers,
+                params={"per_page": "1"},
+            )
+            if resp.status_code == 200:
+                commits = resp.json()
+                if commits and len(commits) > 0:
+                    return commits[0].get("sha", "")
+        except Exception as e:
+            logger.debug("Failed to fetch commit for %s: %s", repo_name, e)
+        return ""
 
     async def discover_trending_repos(self, limit: int = 20) -> list[dict]:
         """Discover top trending repos from GitHub and other sources."""
@@ -170,6 +312,7 @@ class AutoLearner:
                 "language": item.get("language", ""),
                 "topics": item.get("topics", [])[:5],
                 "source": "github_search",
+                "commit": item.get("pushed_at", ""),  # Use pushed_at as proxy for commit
             }
             for item in items
         ]
@@ -239,32 +382,77 @@ class AutoLearner:
     # ── Processing: Analyze repos and extract knowledge ───────────────
 
     async def process_repo(self, repo: dict) -> dict:
-        """Analyze a single repo: fetch README, structure, extract knowledge."""
+        """Analyze a single repo by cloning it locally for comprehensive analysis."""
         url = repo["url"]
         name = repo["name"]
         result = {"repo": name, "url": url, "articles_created": 0,
-                  "facts_extracted": 0, "success": False, "pass_number": 0}
+                  "facts_extracted": 0, "success": False, "pass_number": 0,
+                  "files_analyzed": 0}
 
-        if not self.tracker.should_process(url):
+        # Validate repo name format
+        if not name or "/" not in name:
             result["skipped"] = True
-            result["reason"] = f"Already processed {MAX_PROCESS_COUNT} times"
+            result["reason"] = f"Invalid repo name format: {name}"
+            logger.warning("Skipping invalid repo name: %s", name)
             return result
+
+        # Fetch latest commit to check for updates
+        latest_commit = await self._fetch_latest_commit(name)
+        if not latest_commit:
+            latest_commit = repo.get("commit", "")
+
+        # Check if we should process (not maxed out or has updates)
+        if not self.tracker.should_process(url, latest_commit):
+            result["skipped"] = True
+            result["reason"] = f"Already processed {MAX_PROCESS_COUNT} times and no updates"
+            return result
+
+        # Reset count if repo has been updated
+        if self.tracker.needs_update(url, latest_commit):
+            logger.info("Repo %s has updates, resetting processing count", name)
+            self.tracker.reset_for_update(url)
 
         pass_number = self.tracker.get_count(url) + 1
         result["pass_number"] = pass_number
         logger.info("Processing repo %s (pass %d/%d)", name, pass_number, MAX_PROCESS_COUNT)
 
+        clone_dir = None
         try:
-            # Fetch README
-            readme_content = await self._fetch_readme(name)
+            # Clone the repository locally
+            clone_dir = await self._clone_repo(name)
 
-            # Fetch repo structure (top-level files/dirs)
-            structure = await self._fetch_structure(name)
+            # Walk through all files in the repo
+            all_files = self._walk_repo_files(clone_dir, max_files=500)
+            result["files_analyzed"] = len(all_files)
 
-            # Fetch key files based on pass number
-            key_files = await self._fetch_key_files(name, pass_number)
+            # Read file contents (with limits per pass)
+            key_files = {}
+            files_per_pass = 100  # Process up to 100 files per pass
 
-            # Build knowledge from what we gathered
+            # Distribute files across passes
+            file_list = list(all_files.items())
+            start_idx = (pass_number - 1) * files_per_pass
+            end_idx = min(start_idx + files_per_pass, len(file_list))
+
+            for rel_path, file_path in file_list[start_idx:end_idx]:
+                content = self._read_file_content(file_path)
+                key_files[rel_path] = content
+
+            logger.info("Pass %d: analyzing %d files (indices %d-%d)",
+                       pass_number, len(key_files), start_idx, end_idx)
+
+            # Build structure representation
+            structure = [f"📁 {p}" if Path(p).parent != Path(".") else f"📄 {Path(p).name}"
+                        for p in all_files.keys()][:50]
+
+            # Fetch README if present in clone
+            readme_content = ""
+            for rel_path, file_path in all_files.items():
+                if "readme" in rel_path.lower():
+                    readme_content = self._read_file_content(file_path)
+                    break
+
+            # Build knowledge from comprehensive file analysis
             knowledge = self._extract_knowledge(repo, readme_content, structure, key_files,
                                                  pass_number)
 
@@ -280,12 +468,16 @@ class AutoLearner:
             self._store_learning(name, knowledge, pass_number)
 
             result["success"] = True
-            self.tracker.record_processing(url, True, len(articles), facts)
+            self.tracker.record_processing(url, True, len(articles), facts, latest_commit)
 
         except Exception as e:
             logger.error("Failed to process %s: %s", name, e)
             result["error"] = str(e)
-            self.tracker.record_processing(url, False)
+            self.tracker.record_processing(url, False, 0, 0, latest_commit)
+        finally:
+            # Always cleanup the cloned repo
+            if clone_dir:
+                self._cleanup_repo(name)
 
         return result
 
@@ -301,8 +493,12 @@ class AutoLearner:
             )
             if resp.status_code == 200:
                 return resp.text[:10000]  # Cap at 10k chars
-        except Exception:
-            pass
+            elif resp.status_code == 404:
+                logger.debug("No README found for %s", repo_name)
+            else:
+                logger.warning("Failed to fetch README for %s: %s", repo_name, resp.status_code)
+        except Exception as e:
+            logger.warning("Error fetching README for %s: %s", repo_name, e)
         return ""
 
     async def _fetch_structure(self, repo_name: str) -> list[str]:
@@ -319,30 +515,32 @@ class AutoLearner:
                 items = resp.json()
                 return [f"{'📁' if i['type'] == 'dir' else '📄'} {i['name']}"
                         for i in items[:50]]
-        except Exception:
-            pass
+            elif resp.status_code == 404:
+                logger.debug("Could not fetch structure for %s (repo may be empty)", repo_name)
+            else:
+                logger.warning("Failed to fetch structure for %s: %s", repo_name, resp.status_code)
+        except Exception as e:
+            logger.warning("Error fetching structure for %s: %s", repo_name, e)
         return []
 
-    async def _fetch_key_files(self, repo_name: str, pass_number: int) -> dict[str, str]:
-        """Fetch key files based on pass number for progressive learning."""
+    async def _fetch_key_files(self, repo_name: str, pass_number: int,
+                               structure: list[str], language: str) -> dict[str, str]:
+        """Fetch key files dynamically based on actual repo structure and language."""
         headers = {"Accept": "application/vnd.github.v3.raw"}
         if settings.github_token:
             headers["Authorization"] = f"token {settings.github_token}"
 
-        # Pass 1: README + config files
-        # Pass 2: Source code samples
-        # Pass 3: Tests + docs
-        targets = {
-            1: ["package.json", "pyproject.toml", "Cargo.toml", "setup.py",
-                "requirements.txt", "CONTRIBUTING.md"],
-            2: ["src/main.py", "src/index.ts", "src/lib.rs", "main.go",
-                "app.py", "index.js", "src/main.rs"],
-            3: ["CHANGELOG.md", "docs/README.md", "tests/test_main.py",
-                "test/index.test.ts", "ARCHITECTURE.md"],
-        }
+        # Extract actual file names from structure
+        available_files = []
+        for item in structure:
+            if item.startswith("📄"):
+                available_files.append(item.split(" ", 1)[1])
+
+        # Dynamically determine targets based on language and available files
+        targets = self._determine_targets(pass_number, language, available_files)
 
         files = {}
-        for filename in targets.get(pass_number, targets[1]):
+        for filename in targets:
             try:
                 resp = await self._http.get(
                     f"https://api.github.com/repos/{repo_name}/contents/{filename}",
@@ -350,14 +548,98 @@ class AutoLearner:
                 )
                 if resp.status_code == 200:
                     files[filename] = resp.text[:5000]
-                await asyncio.sleep(0.5)  # Rate limit
-            except Exception:
-                pass
+                elif resp.status_code == 404:
+                    logger.debug("File not found in %s: %s", repo_name, filename)
+                else:
+                    logger.debug("Failed to fetch %s from %s: %s", filename, repo_name, resp.status_code)
+                await asyncio.sleep(1)  # Rate limit (conservative)
+            except Exception as e:
+                logger.debug("Error fetching %s from %s: %s", filename, repo_name, e)
         return files
+
+    def _determine_targets(self, pass_number: int, language: str,
+                          available_files: list[str]) -> list[str]:
+        """Determine which files to fetch based on pass, language, and available files."""
+        targets = []
+
+        if pass_number == 1:
+            # Config files based on language
+            lang_configs = {
+                "Python": ["requirements.txt", "pyproject.toml", "setup.py", "setup.cfg", "Pipfile", "poetry.lock", "environment.yml", "setup.cfg"],
+                "TypeScript": ["package.json", "tsconfig.json", "yarn.lock", "package-lock.json", "tsconfig.base.json"],
+                "JavaScript": ["package.json", "yarn.lock", "package-lock.json"],
+                "Rust": ["Cargo.toml", "Cargo.lock"],
+                "Go": ["go.mod", "go.sum", "go.work"],
+                "Java": ["pom.xml", "build.gradle", "build.gradle.kts", "gradle.properties"],
+                "C++": ["CMakeLists.txt", "Makefile", "configure.ac"],
+                "Ruby": ["Gemfile", "Gemfile.lock", "Rakefile"],
+                "PHP": ["composer.json", "composer.lock"],
+            }
+            for lang, configs in lang_configs.items():
+                if language in lang or any(lang.lower() in language.lower() for lang in ["python", "typescript", "javascript", "rust", "go", "java", "c++", "ruby", "php"]):
+                    targets.extend(configs)
+                    break
+
+            # Common config files
+            targets.extend(["LICENSE", "LICENSE.md", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "SECURITY.md", ".gitignore", ".dockerignore", "Dockerfile", "docker-compose.yml"])
+
+        elif pass_number == 2:
+            # Source files - look for main entry points and core source files
+            source_patterns = {
+                "Python": ["main.py", "app.py", "__init__.py", "src/__init__.py", "manage.py", "wsgi.py", "asgi.py"],
+                "TypeScript": ["index.ts", "main.ts", "src/index.ts", "src/main.ts", "app.ts", "server.ts"],
+                "JavaScript": ["index.js", "main.js", "src/index.js", "src/main.js", "app.js", "server.js"],
+                "Rust": ["main.rs", "lib.rs", "src/main.rs", "src/lib.rs"],
+                "Go": ["main.go", "cmd/main.go", "server.go"],
+            }
+            for lang, patterns in source_patterns.items():
+                if language in lang or any(lang.lower() in language.lower() for lang in ["python", "typescript", "javascript", "rust", "go"]):
+                    targets.extend(patterns)
+                    break
+
+            # Also look for common source directories and all files in them
+            for f in available_files:
+                if f in ["src/", "lib/", "app/", "server/", "api/", "core/"]:
+                    targets.append(f)
+
+        elif pass_number == 3:
+            # Documentation and architecture
+            targets.extend(["README.md", "CHANGELOG.md", "ARCHITECTURE.md", "docs/README.md", "docs/ARCHITECTURE.md", "docs/API.md"])
+            for f in available_files:
+                if f.startswith("test_") or f.endswith(".test.ts") or f.endswith(".test.js") or f.endswith("_test.py"):
+                    targets.append(f)
+                if f.startswith("tests/") or f.startswith("test/") or f.startswith("__tests__/"):
+                    targets.append(f)
+
+        elif pass_number == 4:
+            # Additional source files and utilities
+            for f in available_files:
+                # Add utility files
+                if "util" in f.lower() or "helper" in f.lower() or "utils" in f.lower():
+                    targets.append(f)
+                # Add config files
+                if f.endswith(".config.js") or f.endswith(".config.ts") or f.endswith(".rc"):
+                    targets.append(f)
+                # Add middleware files
+                if "middleware" in f.lower():
+                    targets.append(f)
+
+        elif pass_number == 5:
+            # Example files, templates, and additional docs
+            for f in available_files:
+                if f.startswith("example") or f.startswith("sample") or f.startswith("demo"):
+                    targets.append(f)
+                if f.endswith(".example") or f.endswith(".template") or f.endswith(".sample"):
+                    targets.append(f)
+                if f.startswith("templates/") or f.startswith("template/"):
+                    targets.append(f)
+
+        # Filter to only files that actually exist
+        return [f for f in targets if f in available_files or any(f.startswith(av.rstrip("/")) for av in available_files)]
 
     def _extract_knowledge(self, repo: dict, readme: str, structure: list[str],
                            key_files: dict, pass_number: int) -> dict:
-        """Extract structured knowledge from repo data."""
+        """Extract structured knowledge from repo data with comprehensive code analysis."""
         knowledge = {
             "name": repo["name"],
             "description": repo.get("description", ""),
@@ -375,7 +657,66 @@ class AutoLearner:
         knowledge["technologies"] = self._extract_technologies(readme)
         knowledge["key_concepts"] = self._extract_concepts(readme)
 
+        # Analyze code structure from all files
+        all_code = "\n".join(key_files.values())
+        knowledge["code_technologies"] = self._extract_technologies(all_code)
+        knowledge["code_patterns"] = self._extract_code_patterns(all_code)
+
+        # Extract file type distribution
+        file_types = {}
+        for path in key_files.keys():
+            ext = Path(path).suffix.lower()
+            file_types[ext] = file_types.get(ext, 0) + 1
+        knowledge["file_type_distribution"] = file_types
+
         return knowledge
+
+    @staticmethod
+    def _extract_code_patterns(text: str) -> list[str]:
+        """Extract code patterns and architectural insights."""
+        patterns = []
+
+        # Function/class definitions
+        if re.search(r'\bdef\s+\w+\s*\(', text):
+            patterns.append("function definitions")
+        if re.search(r'\bclass\s+\w+', text):
+            patterns.append("class definitions")
+        if re.search(r'\basync\s+def\b', text):
+            patterns.append("async functions")
+        if re.search(r'\bimport\s+|from\s+\w+\s+import', text):
+            patterns.append("module imports")
+
+        # Architecture patterns
+        if re.search(r'\bdecorator\b|@\w+', text):
+            patterns.append("decorators")
+        if re.search(r'\bcontext\s+manager\b|with\s+', text):
+            patterns.append("context managers")
+        if re.search(r'\btype\s+hint|typing\.', text):
+            patterns.append("type hints")
+        if re.search(r'\btest\b|spec\b', text, re.IGNORECASE):
+            patterns.append("testing")
+
+        # API patterns
+        if re.search(r'\b@app\.(route|get|post|put|delete)', text):
+            patterns.append("REST API endpoints")
+        if re.search(r'\bgraphql\b|Query\b|Mutation\b', text):
+            patterns.append("GraphQL")
+        if re.search(r'\bgrpc\b|@rpc\b', text):
+            patterns.append("gRPC")
+
+        # Database patterns
+        if re.search(r'\bSELECT\s+|INSERT\s+|UPDATE\s+|DELETE\s+', text, re.IGNORECASE):
+            patterns.append("SQL queries")
+        if re.search(r'\bORM\b|SQLAlchemy|Prisma|Sequelize|Mongoose', text, re.IGNORECASE):
+            patterns.append("ORM usage")
+
+        # Configuration patterns
+        if re.search(r'\bconfig\b|settings\b|env\b', text, re.IGNORECASE):
+            patterns.append("configuration management")
+        if re.search(r'\blogger\b|logging\.', text):
+            patterns.append("logging")
+
+        return patterns[:20]
 
     @staticmethod
     def _extract_technologies(text: str) -> list[str]:
@@ -453,6 +794,32 @@ class AutoLearner:
             except Exception:
                 pass
 
+        elif pass_number == 4:
+            # Fourth pass: utilities and helpers
+            content = self._build_utilities_article(knowledge)
+            try:
+                wiki_service.create_article(
+                    title=f"Utilities: {repo_name}",
+                    content=content,
+                    tags=["auto-learned", "utilities", "helpers"],
+                )
+                articles.append(f"utils-{safe_name}")
+            except Exception:
+                pass
+
+        elif pass_number == 5:
+            # Fifth pass: examples and templates
+            content = self._build_examples_article(knowledge)
+            try:
+                wiki_service.create_article(
+                    title=f"Examples: {repo_name}",
+                    content=content,
+                    tags=["auto-learned", "examples", "templates"],
+                )
+                articles.append(f"examples-{safe_name}")
+            except Exception:
+                pass
+
         return articles
 
     def _build_overview_article(self, k: dict) -> str:
@@ -494,6 +861,30 @@ class AutoLearner:
             for fname, content in k["key_files"].items():
                 parts.append(f"\n### `{fname}`\n{content[:500]}")
         parts.append(f"\n---\n*Pass 3 patterns extraction by Oak on {k.get('extracted_at', '')}*")
+        return "\n".join(parts)
+
+    def _build_utilities_article(self, k: dict) -> str:
+        parts = [
+            f"# Utilities & Helpers: {k['name']}\n",
+            "## Utility Functions and Helper Modules",
+        ]
+        if k.get("key_files"):
+            parts.append("\n## Key Utility Files")
+            for fname, content in k["key_files"].items():
+                parts.append(f"\n### `{fname}`\n{content[:600]}")
+        parts.append(f"\n---\n*Pass 4 utilities extraction by Oak on {k.get('extracted_at', '')}*")
+        return "\n".join(parts)
+
+    def _build_examples_article(self, k: dict) -> str:
+        parts = [
+            f"# Examples & Templates: {k['name']}\n",
+            "## Example Code and Template Files",
+        ]
+        if k.get("key_files"):
+            parts.append("\n## Example Files")
+            for fname, content in k["key_files"].items():
+                parts.append(f"\n### `{fname}`\n{content[:600]}")
+        parts.append(f"\n---\n*Pass 5 examples extraction by Oak on {k.get('extracted_at', '')}*")
         return "\n".join(parts)
 
     async def _ingest_context(self, repo_name: str, knowledge: dict,
@@ -556,6 +947,7 @@ class AutoLearner:
             "repos_discovered": 0,
             "repos_processed": 0,
             "repos_skipped": 0,
+            "files_analyzed": 0,
             "articles_created": 0,
             "facts_extracted": 0,
             "errors": [],
@@ -572,7 +964,12 @@ class AutoLearner:
 
             # Step 2: Process each
             for repo in repos:
-                if not self.tracker.should_process(repo["url"]):
+                # Fetch commit for update detection
+                commit = await self._fetch_latest_commit(repo["name"])
+                if commit:
+                    repo["commit"] = commit
+
+                if not self.tracker.should_process(repo["url"], repo.get("commit", "")):
                     report["repos_skipped"] += 1
                     continue
 
@@ -581,13 +978,14 @@ class AutoLearner:
 
                 if result.get("success"):
                     report["repos_processed"] += 1
+                    report["files_analyzed"] += result.get("files_analyzed", 0)
                     report["articles_created"] += result.get("articles_created", 0)
                     report["facts_extracted"] += result.get("facts_extracted", 0)
                 elif result.get("error"):
                     report["errors"].append(f"{repo['name']}: {result['error']}")
 
-                # Rate limit: wait between repos
-                await asyncio.sleep(2)
+                # Rate limit: wait between repos (conservative to stay within 5000/hour)
+                await asyncio.sleep(3)
 
             report["duration_seconds"] = round(time.time() - start, 1)
             report["completed_at"] = datetime.now(timezone.utc).isoformat()
@@ -601,6 +999,7 @@ class AutoLearner:
             audit_log.log(
                 audit_log.TOOL_CALL,
                 f"Daily learning: {report['repos_processed']} repos, "
+                f"{report['files_analyzed']} files, "
                 f"{report['articles_created']} articles, {report['facts_extracted']} facts",
                 {"duration": report["duration_seconds"]},
                 source="auto_learner",
@@ -608,9 +1007,10 @@ class AutoLearner:
 
             self._last_run = report["completed_at"]
             self._last_report = report
-            logger.info("Daily learning complete: %d repos, %d articles, %d facts in %.1fs",
-                        report["repos_processed"], report["articles_created"],
-                        report["facts_extracted"], report["duration_seconds"])
+            logger.info("Daily learning complete: %d repos, %d files, %d articles, %d facts in %.1fs",
+                        report["repos_processed"], report["files_analyzed"],
+                        report["articles_created"], report["facts_extracted"],
+                        report["duration_seconds"])
 
         except Exception as e:
             logger.error("Daily learning failed: %s", e)
