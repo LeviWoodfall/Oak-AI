@@ -30,7 +30,7 @@ from backend.agent.sub_agents import sub_agent_spawner
 from backend.agent.scheduler import workflow_scheduler
 from backend.agent.tiered_context import tiered_context
 from backend.whisper_service import whisper_service
-from backend.joplin_service import joplin_service
+from backend.onenote_service import onenote_service
 
 # ── Logging ──────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -660,99 +660,82 @@ async def context_remove(uri: str):
     raise HTTPException(404, "Context entry not found")
 
 
-# ── Joplin Notes ─────────────────────────────────────────────────────
+# ── OneNote (Microsoft Graph) ─────────────────────────────────────────
 
-@app.get("/api/joplin/status")
-async def joplin_status():
-    status = await joplin_service.ping()
-    return status
+@app.get("/api/onenote/status")
+async def onenote_status():
+    return await onenote_service.ping()
 
-class JoplinToken(BaseModel):
-    token: str
+class MSClientId(BaseModel):
+    client_id: str
 
-@app.post("/api/joplin/token")
-async def joplin_set_token(req: JoplinToken):
-    joplin_service.set_token(req.token)
-    status = await joplin_service.ping()
-    return status
+@app.post("/api/onenote/setup")
+async def onenote_setup(req: MSClientId):
+    onenote_service.set_client_id(req.client_id)
+    return onenote_service.start_device_flow()
 
-@app.get("/api/joplin/notebooks")
-async def joplin_notebooks():
-    notebooks = await joplin_service.list_notebooks()
-    return {"notebooks": notebooks}
+class DeviceFlowComplete(BaseModel):
+    flow: dict
 
-@app.get("/api/joplin/notebooks/{notebook_id}/notes")
-async def joplin_notebook_notes(notebook_id: str):
-    notes = await joplin_service.get_notebook_notes(notebook_id)
-    return {"notes": notes}
+@app.post("/api/onenote/auth/complete")
+async def onenote_auth_complete(req: DeviceFlowComplete):
+    return onenote_service.complete_device_flow(req.flow)
 
-@app.get("/api/joplin/notes")
-async def joplin_list_notes(limit: int = 50):
-    notes = await joplin_service.list_notes(limit=limit)
-    return {"notes": notes}
+@app.get("/api/onenote/notebooks")
+async def onenote_notebooks():
+    return {"notebooks": await onenote_service.list_notebooks()}
 
-@app.get("/api/joplin/notes/{note_id}")
-async def joplin_get_note(note_id: str):
-    note = await joplin_service.get_note(note_id)
-    if not note:
-        raise HTTPException(404, "Note not found")
-    tags = await joplin_service.get_note_tags(note_id)
-    note["tags"] = [t["title"] for t in tags]
-    return note
+@app.get("/api/onenote/notebooks/{notebook_id}/sections")
+async def onenote_sections(notebook_id: str):
+    return {"sections": await onenote_service.list_sections(notebook_id)}
 
-class JoplinNote(BaseModel):
+@app.get("/api/onenote/pages")
+async def onenote_list_pages(section_id: str = "", limit: int = 50):
+    return {"pages": await onenote_service.list_pages(section_id, limit)}
+
+@app.get("/api/onenote/pages/{page_id}")
+async def onenote_get_page(page_id: str):
+    content = await onenote_service.get_page_content(page_id)
+    if not content:
+        raise HTTPException(404, "Page not found")
+    return {"id": page_id, "content": content}
+
+class OneNotePage(BaseModel):
     title: str
     body: str
-    notebook_id: str = ""
+    section_id: str = ""
     tags: list[str] = []
-    is_todo: bool = False
 
-@app.post("/api/joplin/notes")
-async def joplin_create_note(req: JoplinNote):
-    note = await joplin_service.create_note(
-        req.title, req.body, req.notebook_id, req.tags, req.is_todo
-    )
-    return note
+@app.post("/api/onenote/pages")
+async def onenote_create_page(req: OneNotePage):
+    if req.section_id:
+        return await onenote_service.create_page(req.section_id, req.title, onenote_service._md_to_html(req.body))
+    return await onenote_service.save_ai_note(req.title, req.body, req.tags)
 
-class JoplinNoteUpdate(BaseModel):
-    title: Optional[str] = None
-    body: Optional[str] = None
-
-@app.put("/api/joplin/notes/{note_id}")
-async def joplin_update_note(note_id: str, req: JoplinNoteUpdate):
-    note = await joplin_service.update_note(note_id, req.title, req.body)
-    return note
-
-@app.delete("/api/joplin/notes/{note_id}")
-async def joplin_delete_note(note_id: str):
-    if await joplin_service.delete_note(note_id):
+@app.delete("/api/onenote/pages/{page_id}")
+async def onenote_delete_page(page_id: str):
+    if await onenote_service.delete_page(page_id):
         return {"status": "deleted"}
-    raise HTTPException(404, "Note not found")
+    raise HTTPException(404, "Page not found")
 
-@app.get("/api/joplin/search")
-async def joplin_search(q: str = Query(...), limit: int = 20):
-    notes = await joplin_service.search_notes(q, limit=limit)
-    return {"results": notes}
+@app.get("/api/onenote/search")
+async def onenote_search(q: str = Query(...), limit: int = 20):
+    return {"results": await onenote_service.search_pages(q, limit)}
 
-@app.get("/api/joplin/tags")
-async def joplin_tags():
-    tags = await joplin_service.list_tags()
-    return {"tags": tags}
-
-# Joplin ↔ Wiki sync
-@app.post("/api/joplin/notes/{note_id}/to-wiki")
-async def joplin_note_to_wiki(note_id: str):
-    article = await joplin_service.sync_note_to_wiki(note_id)
+# OneNote ↔ Wiki sync
+@app.post("/api/onenote/pages/{page_id}/to-wiki")
+async def onenote_page_to_wiki(page_id: str):
+    article = await onenote_service.sync_page_to_wiki(page_id)
     if not article:
-        raise HTTPException(404, "Note not found")
+        raise HTTPException(404, "Page not found")
     return {"status": "synced", "wiki_slug": article["slug"]}
 
-@app.post("/api/joplin/wiki/{wiki_slug}/to-joplin")
-async def wiki_to_joplin(wiki_slug: str, notebook_id: str = ""):
-    note = await joplin_service.sync_wiki_to_note(wiki_slug, notebook_id)
-    if not note:
+@app.post("/api/onenote/wiki/{wiki_slug}/to-onenote")
+async def wiki_to_onenote(wiki_slug: str):
+    result = await onenote_service.sync_wiki_to_page(wiki_slug)
+    if not result:
         raise HTTPException(404, "Wiki article not found")
-    return {"status": "synced", "note_id": note.get("id", "")}
+    return {"status": "synced", "page_id": result.get("id", "")}
 
 # AI note-taking
 class AINoteRequest(BaseModel):
@@ -760,24 +743,23 @@ class AINoteRequest(BaseModel):
     content: str
     tags: list[str] = []
 
-@app.post("/api/joplin/ai-note")
-async def joplin_ai_note(req: AINoteRequest):
-    note = await joplin_service.save_ai_note(req.title, req.content, req.tags)
-    return note
+@app.post("/api/onenote/ai-note")
+async def onenote_ai_note(req: AINoteRequest):
+    return await onenote_service.save_ai_note(req.title, req.content, req.tags)
 
-@app.post("/api/joplin/chat-summary/{conv_id}")
-async def joplin_save_chat_summary(conv_id: str):
+@app.post("/api/onenote/chat-summary/{conv_id}")
+async def onenote_save_chat_summary(conv_id: str):
     conv = conversation_manager.get(conv_id)
     if not conv:
         raise HTTPException(404, "Conversation not found")
     msgs = conv.get("messages", [])
     summary_parts = []
     for m in msgs:
-        role = "**You**" if m["role"] == "user" else "**CodePilot**"
+        role = "**You**" if m["role"] == "user" else "**Oak**"
         summary_parts.append(f"{role}: {m['content'][:500]}")
     summary = "\n\n---\n\n".join(summary_parts)
-    note = await joplin_service.save_chat_summary(conv["title"], summary)
-    return {"status": "saved", "note_id": note.get("id", "")}
+    result = await onenote_service.save_chat_summary(conv["title"], summary)
+    return {"status": "saved", "page_id": result.get("id", "")}
 
 
 # ── Run ──────────────────────────────────────────────────────────────

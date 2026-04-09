@@ -330,12 +330,12 @@
                 <div id="notes-viewer" class="flex-1 overflow-y-auto p-6">
                     <div id="notes-welcome" class="text-center py-20">
                         <i data-lucide="notebook-pen" class="w-16 h-16 mx-auto text-cp-muted mb-4"></i>
-                        <h2 class="text-xl font-semibold mb-2">Joplin Notes</h2>
-                        <p class="text-cp-muted text-sm max-w-md mx-auto mb-4">Connect to Joplin for AI-powered note-taking. Your notes are searchable by the agent and can sync with the wiki.</p>
+                        <h2 class="text-xl font-semibold mb-2">OneNote</h2>
+                        <p class="text-cp-muted text-sm max-w-md mx-auto mb-4">Connect to Microsoft OneNote for AI-powered note-taking. Your notes are searchable by the agent and can sync with the wiki.</p>
                         <div id="joplin-setup" class="max-w-sm mx-auto space-y-3">
-                            <p class="text-xs text-cp-muted">Enter your Joplin API token (found in Joplin → Settings → Web Clipper):</p>
+                            <p class="text-xs text-cp-muted">Enter your Azure AD App Client ID (register at <a href="https://portal.azure.com" target="_blank" class="text-cp-accent underline">portal.azure.com</a>):</p>
                             <div class="flex gap-2">
-                                <input type="password" id="joplin-token-quick" placeholder="Joplin API token..."
+                                <input type="text" id="joplin-token-quick" placeholder="Azure AD Client ID..."
                                     class="flex-1 px-3 py-2 bg-cp-bg border border-cp-border rounded-lg text-sm text-cp-text focus:border-cp-accent focus:outline-none">
                                 <button onclick="saveJoplinToken(document.getElementById('joplin-token-quick').value)" class="px-4 py-2 bg-cp-accent text-white text-sm rounded-lg hover:bg-cp-accent/80">Connect</button>
                             </div>

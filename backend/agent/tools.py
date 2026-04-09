@@ -71,19 +71,19 @@ TOOL_DEFINITIONS = [
         "parameters": {"query": "string"},
     },
     {
-        "name": "joplin_search",
-        "description": "Search Joplin notes by keyword. Returns matching notes with titles and snippets.",
+        "name": "onenote_search",
+        "description": "Search OneNote pages by title. Returns matching pages.",
         "parameters": {"query": "string"},
     },
     {
-        "name": "joplin_read",
-        "description": "Read a Joplin note by its ID. Returns title and full markdown body.",
-        "parameters": {"note_id": "string"},
+        "name": "onenote_read",
+        "description": "Read a OneNote page by its ID. Returns title and HTML content.",
+        "parameters": {"page_id": "string"},
     },
     {
-        "name": "joplin_write",
-        "description": "Create or update a Joplin note. If note_id is provided, updates that note. Otherwise creates a new one in the Oak notebook.",
-        "parameters": {"title": "string", "body": "string (markdown)", "note_id": "string (optional, for update)", "tags": "list of strings (optional)"},
+        "name": "onenote_write",
+        "description": "Create a new OneNote page in the Oak notebook. Body is markdown (auto-converted to HTML).",
+        "parameters": {"title": "string", "body": "string (markdown)", "tags": "list of strings (optional)"},
     },
 ]
 
@@ -106,9 +106,9 @@ class ToolRegistry:
             "git_diff": self._git_diff,
             "git_commit": self._git_commit,
             "web_search": self._web_search,
-            "joplin_search": self._joplin_search,
-            "joplin_read": self._joplin_read,
-            "joplin_write": self._joplin_write,
+            "onenote_search": self._onenote_search,
+            "onenote_read": self._onenote_read,
+            "onenote_write": self._onenote_write,
         }
 
     @property
@@ -289,38 +289,34 @@ class ToolRegistry:
         except Exception as e:
             return {"result": f"Search failed: {e}"}
 
-    # ── Joplin Tools ─────────────────────────────────────────────────
+    # ── OneNote Tools ──────────────────────────────────────────────
 
-    async def _joplin_search(self, query: str) -> dict:
-        from backend.joplin_service import joplin_service
-        if not joplin_service.configured:
-            return {"result": "Joplin not configured. Set JOPLIN_TOKEN in Settings."}
-        notes = await joplin_service.search_notes(query, limit=10)
-        if not notes:
-            return {"result": "No matching notes found"}
-        lines = []
-        for n in notes:
-            body_preview = (n.get("body", "")[:150] + "...") if n.get("body") else ""
-            lines.append(f"- [{n['title']}] (id: {n['id']})\n  {body_preview}")
-        return {"result": "\n".join(lines), "count": len(notes)}
+    async def _onenote_search(self, query: str) -> dict:
+        from backend.onenote_service import onenote_service
+        if not onenote_service.authenticated:
+            return {"result": "OneNote not connected. Authenticate via Settings."}
+        pages = await onenote_service.search_pages(query, limit=10)
+        if not pages:
+            return {"result": "No matching pages found"}
+        lines = [f"- [{p['title']}] (id: {p['id']})" for p in pages]
+        return {"result": "\n".join(lines), "count": len(pages)}
 
-    async def _joplin_read(self, note_id: str) -> dict:
-        from backend.joplin_service import joplin_service
-        if not joplin_service.configured:
-            return {"result": "Joplin not configured. Set JOPLIN_TOKEN in Settings."}
-        note = await joplin_service.get_note(note_id)
-        if not note:
-            return {"result": f"Note {note_id} not found"}
-        return {"result": f"# {note['title']}\n\n{note.get('body', '')}", "title": note["title"]}
+    async def _onenote_read(self, page_id: str) -> dict:
+        from backend.onenote_service import onenote_service
+        if not onenote_service.authenticated:
+            return {"result": "OneNote not connected. Authenticate via Settings."}
+        content = await onenote_service.get_page_content(page_id)
+        if not content:
+            return {"result": f"Page {page_id} not found"}
+        from bs4 import BeautifulSoup
+        text = BeautifulSoup(content, 'html.parser').get_text(separator='\n').strip()
+        return {"result": text[:5000], "page_id": page_id}
 
-    async def _joplin_write(self, title: str, body: str, note_id: str = "",
-                            tags: list[str] = None) -> dict:
-        from backend.joplin_service import joplin_service
-        if not joplin_service.configured:
-            return {"result": "Joplin not configured. Set JOPLIN_TOKEN in Settings."}
-        if note_id:
-            note = await joplin_service.update_note(note_id, title=title, body=body)
-            return {"result": f"Updated note: {note.get('title', title)}", "note_id": note_id}
-        else:
-            note = await joplin_service.save_ai_note(title, body, tags=tags)
-            return {"result": f"Created note: {title}", "note_id": note.get("id", "")}
+    async def _onenote_write(self, title: str, body: str, tags: list[str] = None) -> dict:
+        from backend.onenote_service import onenote_service
+        if not onenote_service.authenticated:
+            return {"result": "OneNote not connected. Authenticate via Settings."}
+        result = await onenote_service.save_ai_note(title, body, tags=tags)
+        if result.get("error"):
+            return {"result": f"Failed: {result['error']}"}
+        return {"result": f"Created page: {title}", "page_id": result.get("id", "")}

@@ -898,60 +898,59 @@ async function indexCurrentRepo() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Joplin Notes
+// OneNote (Microsoft Graph)
 // ═══════════════════════════════════════════════════════════════════
 let currentNoteId = null;
 let editingNoteId = null;
 
 async function loadJoplinNotes() {
     try {
-        const statusResp = await fetch('/api/joplin/status');
+        const statusResp = await fetch('/api/onenote/status');
         const status = await statusResp.json();
-        if (!status.connected || !status.configured) {
+        if (!status.connected) {
             document.getElementById('notes-welcome').classList.remove('hidden');
             document.getElementById('notes-note-view').classList.add('hidden');
-            document.getElementById('notes-list').innerHTML = '<p class="text-xs text-cp-muted p-2">Connect Joplin first</p>';
+            document.getElementById('notes-list').innerHTML = '<p class="text-xs text-cp-muted p-2">Connect OneNote first</p>';
             return;
         }
         document.getElementById('joplin-setup').classList.add('hidden');
         await Promise.all([loadNotebooks(), loadNotesList()]);
     } catch {
-        document.getElementById('notes-list').innerHTML = '<p class="text-xs text-cp-muted p-2">Cannot reach Joplin</p>';
+        document.getElementById('notes-list').innerHTML = '<p class="text-xs text-cp-muted p-2">Cannot reach OneNote</p>';
     }
 }
 
 async function loadNotebooks() {
     try {
-        const resp = await fetch('/api/joplin/notebooks');
+        const resp = await fetch('/api/onenote/notebooks');
         const data = await resp.json();
         const select = document.getElementById('notebook-select');
         const editorSelect = document.getElementById('note-edit-notebook');
-        const opts = '<option value="">All Notebooks</option>' +
+        const opts = '<option value="">All Pages</option>' +
             (data.notebooks || []).map(nb => `<option value="${nb.id}">${escapeHtml(nb.title)}</option>`).join('');
         select.innerHTML = opts;
-        editorSelect.innerHTML = opts.replace('All Notebooks', 'Default notebook');
+        editorSelect.innerHTML = opts.replace('All Pages', 'Oak notebook');
     } catch {}
 }
 
-async function loadNotesList(notebookId) {
+async function loadNotesList(sectionId) {
     try {
-        const url = notebookId ? `/api/joplin/notebooks/${notebookId}/notes` : '/api/joplin/notes?limit=50';
+        const url = `/api/onenote/pages?section_id=${sectionId || ''}&limit=50`;
         const resp = await fetch(url);
         const data = await resp.json();
-        const notes = data.notes || [];
+        const pages = data.pages || [];
         const el = document.getElementById('notes-list');
-        if (!notes.length) {
-            el.innerHTML = '<p class="text-xs text-cp-muted p-2">No notes</p>';
+        if (!pages.length) {
+            el.innerHTML = '<p class="text-xs text-cp-muted p-2">No pages</p>';
             return;
         }
-        el.innerHTML = notes.map(n => {
-            const icon = n.is_todo ? (n.todo_completed ? 'check-square' : 'square') : 'file-text';
-            const active = n.id === currentNoteId ? 'active' : '';
-            const date = n.updated_time ? new Date(n.updated_time).toLocaleDateString() : '';
-            return `<div class="sidebar-item flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer text-sm ${active}" onclick="viewJoplinNote('${n.id}')">
-                <i data-lucide="${icon}" class="w-3.5 h-3.5 text-cp-muted flex-shrink-0"></i>
+        el.innerHTML = pages.map(p => {
+            const active = p.id === currentNoteId ? 'active' : '';
+            const date = p.updated ? new Date(p.updated).toLocaleDateString() : '';
+            return `<div class="sidebar-item flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer text-sm ${active}" onclick="viewJoplinNote('${p.id}')">
+                <i data-lucide="file-text" class="w-3.5 h-3.5 text-cp-muted flex-shrink-0"></i>
                 <div class="truncate flex-1">
-                    <div class="truncate">${escapeHtml(n.title)}</div>
+                    <div class="truncate">${escapeHtml(p.title)}</div>
                     <div class="text-xs text-cp-muted">${date}</div>
                 </div>
             </div>`;
@@ -967,85 +966,66 @@ function loadNotebookNotes(notebookId) {
 async function searchJoplinNotes(query) {
     if (!query.trim()) return loadNotesList();
     try {
-        const resp = await fetch(`/api/joplin/search?q=${encodeURIComponent(query)}`);
+        const resp = await fetch(`/api/onenote/search?q=${encodeURIComponent(query)}`);
         const data = await resp.json();
         const el = document.getElementById('notes-list');
-        const notes = data.results || [];
-        if (!notes.length) {
+        const pages = data.results || [];
+        if (!pages.length) {
             el.innerHTML = '<p class="text-xs text-cp-muted p-2">No results</p>';
             return;
         }
-        el.innerHTML = notes.map(n => `<div class="sidebar-item flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer text-sm" onclick="viewJoplinNote('${n.id}')">
+        el.innerHTML = pages.map(p => `<div class="sidebar-item flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer text-sm" onclick="viewJoplinNote('${p.id}')">
             <i data-lucide="search" class="w-3.5 h-3.5 text-cp-muted flex-shrink-0"></i>
-            <span class="truncate">${escapeHtml(n.title)}</span>
+            <span class="truncate">${escapeHtml(p.title)}</span>
         </div>`).join('');
         lucide.createIcons();
     } catch {}
 }
 
-async function viewJoplinNote(noteId) {
+async function viewJoplinNote(pageId) {
     try {
-        const resp = await fetch(`/api/joplin/notes/${noteId}`);
-        const note = await resp.json();
-        currentNoteId = noteId;
+        const resp = await fetch(`/api/onenote/pages/${pageId}`);
+        const data = await resp.json();
+        currentNoteId = pageId;
 
         document.getElementById('notes-welcome').classList.add('hidden');
         document.getElementById('notes-note-view').classList.remove('hidden');
         document.getElementById('notes-editor').classList.add('hidden');
         document.getElementById('notes-viewer').classList.remove('hidden');
 
-        document.getElementById('note-view-title').textContent = note.title;
-        document.getElementById('note-view-content').innerHTML = marked.parse(note.body || '');
-        document.getElementById('note-view-tags').innerHTML = (note.tags || []).map(t =>
-            `<span class="px-2 py-0.5 bg-cp-accent/20 text-cp-accent text-xs rounded-full">${t}</span>`
-        ).join('');
+        // OneNote returns HTML content — render directly
+        const content = data.content || '';
+        document.getElementById('note-view-title').textContent = 'OneNote Page';
+        document.getElementById('note-view-content').innerHTML = content;
+        document.getElementById('note-view-tags').innerHTML = '';
 
         document.querySelectorAll('#note-view-content pre code').forEach(block => hljs.highlightElement(block));
-        loadNotesList(document.getElementById('notebook-select').value || undefined);
     } catch {}
 }
 
 function showNoteEditor(noteId) {
-    editingNoteId = noteId || null;
+    editingNoteId = null;
     document.getElementById('notes-viewer').classList.add('hidden');
     document.getElementById('notes-editor').classList.remove('hidden');
-
-    if (noteId) {
-        fetch(`/api/joplin/notes/${noteId}`).then(r => r.json()).then(note => {
-            document.getElementById('note-edit-title').value = note.title;
-            document.getElementById('note-edit-body').value = note.body || '';
-        });
-    } else {
-        document.getElementById('note-edit-title').value = '';
-        document.getElementById('note-edit-body').value = '';
-    }
+    document.getElementById('note-edit-title').value = '';
+    document.getElementById('note-edit-body').value = '';
 }
 
 async function saveJoplinNote() {
     const title = document.getElementById('note-edit-title').value.trim();
     const body = document.getElementById('note-edit-body').value;
-    const notebookId = document.getElementById('note-edit-notebook').value;
     if (!title) { toast('Title is required', 'error'); return; }
 
     try {
-        if (editingNoteId) {
-            await fetch(`/api/joplin/notes/${editingNoteId}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ title, body }),
-            });
-            toast('Note updated', 'success');
-            viewJoplinNote(editingNoteId);
-        } else {
-            const resp = await fetch('/api/joplin/notes', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ title, body, notebook_id: notebookId }),
-            });
-            const note = await resp.json();
-            toast('Note created', 'success');
-            viewJoplinNote(note.id);
-        }
+        const resp = await fetch('/api/onenote/pages', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title, body }),
+        });
+        const page = await resp.json();
+        toast('Page created in OneNote', 'success');
+        cancelNoteEdit();
+        loadNotesList();
     } catch (e) {
         toast(`Error: ${e.message}`, 'error');
     }
@@ -1057,23 +1037,23 @@ function cancelNoteEdit() {
 }
 
 function editCurrentNote() {
-    if (currentNoteId) showNoteEditor(currentNoteId);
+    if (currentNoteId) showNoteEditor();
 }
 
 async function deleteCurrentNote() {
-    if (!currentNoteId || !confirm('Delete this note?')) return;
-    await fetch(`/api/joplin/notes/${currentNoteId}`, { method: 'DELETE' });
+    if (!currentNoteId || !confirm('Delete this page?')) return;
+    await fetch(`/api/onenote/pages/${currentNoteId}`, { method: 'DELETE' });
     currentNoteId = null;
     document.getElementById('notes-note-view').classList.add('hidden');
     document.getElementById('notes-welcome').classList.remove('hidden');
-    toast('Note deleted', 'success');
+    toast('Page deleted', 'success');
     loadNotesList();
 }
 
 async function syncNoteToWiki() {
     if (!currentNoteId) return;
     try {
-        const resp = await fetch(`/api/joplin/notes/${currentNoteId}/to-wiki`, { method: 'POST' });
+        const resp = await fetch(`/api/onenote/pages/${currentNoteId}/to-wiki`, { method: 'POST' });
         const data = await resp.json();
         toast(`Synced to wiki: ${data.wiki_slug}`, 'success');
     } catch (e) {
@@ -1091,23 +1071,22 @@ function askAIAboutNote() {
     sendChat();
 }
 
-async function saveJoplinToken(token) {
-    if (!token) return;
+async function saveJoplinToken(clientId) {
+    if (!clientId) return;
     try {
-        const resp = await fetch('/api/joplin/token', {
+        const resp = await fetch('/api/onenote/setup', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ token }),
+            body: JSON.stringify({ client_id: clientId }),
         });
         const data = await resp.json();
         const statusEl = document.getElementById('joplin-connect-status');
-        if (data.connected) {
-            statusEl.textContent = '✓ Connected to Joplin';
-            statusEl.className = 'text-xs text-cp-success';
-            toast('Connected to Joplin', 'success');
-            loadJoplinNotes();
+        if (data.user_code) {
+            statusEl.innerHTML = `Go to <a href="${data.verification_uri}" target="_blank" class="text-cp-accent underline">${data.verification_uri}</a> and enter code: <strong class="text-cp-accent">${data.user_code}</strong>`;
+            statusEl.className = 'text-xs text-cp-warning';
+            toast('Enter the code in your browser to authenticate', 'info');
         } else {
-            statusEl.textContent = `✗ ${data.error || 'Could not connect'}`;
+            statusEl.textContent = data.error || 'Setup failed';
             statusEl.className = 'text-xs text-cp-error';
         }
     } catch (e) {

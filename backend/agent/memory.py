@@ -1,10 +1,22 @@
 """
-Agent Memory — persistent long-term memory system.
-Inspired by hermes-agent (user profile, self-improving) and deer-flow (dedup, task memory).
-Stores memory as structured JSON with automatic deduplication.
+Agent Memory — hermes-agent-inspired persistent memory system.
+
+Dual-store architecture (from hermes-agent):
+  MEMORY.md — Agent's personal notes (environment, lessons, conventions)
+  USER.md   — User profile (name, preferences, communication style)
+
+Key patterns adapted from hermes-agent:
+  - Frozen snapshot: injected into system prompt at session start, immutable during session
+  - Capacity management: hard char limits with usage %, consolidation at >80%
+  - Memory tool: add/replace/remove actions (agent manages its own memory)
+  - Security scanning: blocks injection patterns before storing
+  - Duplicate prevention: rejects exact duplicates
+  - Session search: past conversations searchable via SQLite FTS
 """
 import json
 import logging
+import re
+import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,187 +28,269 @@ logger = logging.getLogger("oak.agent.memory")
 MEMORY_DIR = DATA_DIR / "memory"
 MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
-USER_PROFILE_FILE = MEMORY_DIR / "user_profile.json"
+MEMORY_FILE = MEMORY_DIR / "MEMORY.md"   # Agent's personal notes
+USER_FILE = MEMORY_DIR / "USER.md"       # User profile
 TASK_MEMORY_FILE = MEMORY_DIR / "task_memory.json"
-FACTS_FILE = MEMORY_DIR / "facts.json"
-LEARNINGS_FILE = MEMORY_DIR / "learnings.json"
+SESSION_DB = MEMORY_DIR / "sessions.db"
+
+# Hermes-style character limits (~tokens = chars / 2.75)
+MEMORY_CHAR_LIMIT = 2200   # ~800 tokens
+USER_CHAR_LIMIT = 1375     # ~500 tokens
+ENTRY_SEPARATOR = "§"
+
+# Security: patterns to reject from memory entries
+INJECTION_PATTERNS = [
+    r"ignore\s+(all\s+)?previous\s+instructions",
+    r"you\s+are\s+now",
+    r"system\s*:\s*",
+    r"<\|im_start\|>",
+    r"BEGIN\s+INJECTION",
+    r"ssh\s+.*@.*\s+-p",
+    r"curl\s+.*\|\s*bash",
+    r"eval\s*\(",
+]
 
 
 class AgentMemory:
-    """Persistent memory across sessions. Knows who you are and what you've done."""
+    """Hermes-inspired dual-store persistent memory with capacity management."""
 
     def __init__(self):
-        self._user_profile = self._load(USER_PROFILE_FILE, default={
-            "name": "",
-            "preferences": {},
-            "tech_stack": [],
-            "coding_style": "",
-            "notes": [],
-            "updated": "",
-        })
-        self._facts = self._load(FACTS_FILE, default=[])
-        self._learnings = self._load(LEARNINGS_FILE, default=[])
-        self._task_memory = self._load(TASK_MEMORY_FILE, default=[])
+        # Load dual stores from markdown files (hermes pattern)
+        self._memory_entries = self._load_md(MEMORY_FILE)
+        self._user_entries = self._load_md(USER_FILE)
+        self._task_memory = self._load_json(TASK_MEMORY_FILE, default=[])
+        self._frozen_snapshot = None  # Set once per session
+        self._init_session_db()
 
-    # ── User Profile ─────────────────────────────────────────────────
+    # ── Memory Tool Actions (hermes pattern: add/replace/remove) ────
+
+    def memory_add(self, target: str, text: str) -> dict:
+        """Add an entry to memory or user store. Returns success/error."""
+        if not self._security_check(text):
+            return {"success": False, "error": "Entry blocked by security scan"}
+
+        entries = self._memory_entries if target == "memory" else self._user_entries
+        limit = MEMORY_CHAR_LIMIT if target == "memory" else USER_CHAR_LIMIT
+
+        # Duplicate check
+        if text.strip() in [e.strip() for e in entries]:
+            return {"success": True, "note": "No duplicate added"}
+
+        current_size = sum(len(e) for e in entries)
+        if current_size + len(text) > limit:
+            return {
+                "success": False,
+                "error": f"Memory at {current_size}/{limit} chars. Adding {len(text)} chars would exceed limit. Replace or remove entries first.",
+                "current_entries": entries,
+                "usage": f"{current_size}/{limit}",
+            }
+
+        entries.append(text.strip())
+        self._save_store(target)
+        return {"success": True, "usage": f"{current_size + len(text)}/{limit}"}
+
+    def memory_replace(self, target: str, old_text: str, new_text: str) -> dict:
+        """Replace an entry using substring matching (hermes pattern)."""
+        if not self._security_check(new_text):
+            return {"success": False, "error": "Entry blocked by security scan"}
+
+        entries = self._memory_entries if target == "memory" else self._user_entries
+        for i, entry in enumerate(entries):
+            if old_text in entry:
+                entries[i] = entry.replace(old_text, new_text)
+                self._save_store(target)
+                return {"success": True, "replaced": True}
+        return {"success": False, "error": "old_text not found in any entry"}
+
+    def memory_remove(self, target: str, old_text: str) -> dict:
+        """Remove an entry using substring matching."""
+        entries = self._memory_entries if target == "memory" else self._user_entries
+        for i, entry in enumerate(entries):
+            if old_text in entry:
+                entries.pop(i)
+                self._save_store(target)
+                return {"success": True, "removed": True}
+        return {"success": False, "error": "old_text not found in any entry"}
+
+    # ── Frozen Snapshot (hermes pattern) ──────────────────────────────
+
+    def build_context(self) -> str:
+        """Build the frozen memory snapshot for the system prompt.
+        Called once at session start, never changes mid-session (hermes pattern)."""
+        if self._frozen_snapshot is not None:
+            return self._frozen_snapshot
+
+        parts = []
+
+        # MEMORY block
+        mem_text = ENTRY_SEPARATOR.join(self._memory_entries)
+        mem_size = len(mem_text)
+        mem_pct = round(mem_size / MEMORY_CHAR_LIMIT * 100) if MEMORY_CHAR_LIMIT else 0
+        if self._memory_entries:
+            parts.append(
+                f"══ MEMORY (your personal notes) [{mem_pct}% — {mem_size}/{MEMORY_CHAR_LIMIT} chars] ══\n"
+                + mem_text
+            )
+
+        # USER block
+        user_text = ENTRY_SEPARATOR.join(self._user_entries)
+        user_size = len(user_text)
+        user_pct = round(user_size / USER_CHAR_LIMIT * 100) if USER_CHAR_LIMIT else 0
+        if self._user_entries:
+            parts.append(
+                f"══ USER PROFILE [{user_pct}% — {user_size}/{USER_CHAR_LIMIT} chars] ══\n"
+                + user_text
+            )
+
+        # Recent tasks
+        recent = self._task_memory[-3:]
+        if recent:
+            task_lines = []
+            for t in recent:
+                status = "✓" if t.get("success") else "✗"
+                task_lines.append(f"  {status} {t['task'][:80]}")
+            parts.append("Recent tasks:\n" + "\n".join(task_lines))
+
+        self._frozen_snapshot = "\n\n".join(parts) if parts else ""
+        return self._frozen_snapshot
+
+    def reset_snapshot(self):
+        """Reset the frozen snapshot (call at session start)."""
+        self._frozen_snapshot = None
+
+    # ── Backward-compatible API (used by main.py endpoints) ──────────
 
     def get_profile(self) -> dict:
-        return self._user_profile
+        return {"entries": self._user_entries, "usage": f"{sum(len(e) for e in self._user_entries)}/{USER_CHAR_LIMIT}"}
 
     def update_profile(self, **kwargs) -> dict:
-        """Update user profile fields."""
+        """Add key=value pairs to user profile store."""
         for key, value in kwargs.items():
-            if key in self._user_profile:
-                self._user_profile[key] = value
-        self._user_profile["updated"] = datetime.now(timezone.utc).isoformat()
-        self._save(USER_PROFILE_FILE, self._user_profile)
-        return self._user_profile
-
-    def add_tech_stack(self, tech: str):
-        if tech not in self._user_profile["tech_stack"]:
-            self._user_profile["tech_stack"].append(tech)
-            self._save(USER_PROFILE_FILE, self._user_profile)
-
-    def add_preference(self, key: str, value: str):
-        self._user_profile["preferences"][key] = value
-        self._save(USER_PROFILE_FILE, self._user_profile)
-
-    # ── Facts (deduped knowledge) ────────────────────────────────────
+            if value:
+                self.memory_add("user", f"{key}: {value}")
+        return self.get_profile()
 
     def add_fact(self, fact: str, source: str = "conversation") -> bool:
-        """Add a fact, skipping duplicates. Returns True if added."""
-        normalised = fact.strip().lower()
-        for existing in self._facts:
-            if existing["text"].strip().lower() == normalised:
-                return False
-        self._facts.append({
-            "text": fact.strip(),
-            "source": source,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
-        if len(self._facts) > 500:
-            self._facts = self._facts[-500:]
-        self._save(FACTS_FILE, self._facts)
-        logger.info("Memory: added fact from %s", source)
-        return True
+        result = self.memory_add("memory", fact)
+        return result.get("success", False)
 
     def get_facts(self, limit: int = 50) -> list[dict]:
-        return self._facts[-limit:]
+        return [{"text": e, "source": "memory"} for e in self._memory_entries[-limit:]]
 
     def search_facts(self, query: str) -> list[dict]:
-        """Simple keyword search across facts."""
         q = query.lower()
-        return [f for f in self._facts if q in f["text"].lower()]
-
-    # ── Learnings (self-improvement) ─────────────────────────────────
-
-    def add_learning(self, learning: str, context: str = "") -> bool:
-        """Record something the agent learned. Deduped."""
-        normalised = learning.strip().lower()
-        for existing in self._learnings:
-            if existing["text"].strip().lower() == normalised:
-                return False
-        self._learnings.append({
-            "text": learning.strip(),
-            "context": context,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
-        if len(self._learnings) > 200:
-            self._learnings = self._learnings[-200:]
-        self._save(LEARNINGS_FILE, self._learnings)
-        return True
+        return [{"text": e, "source": "memory"} for e in self._memory_entries if q in e.lower()]
 
     def get_learnings(self, limit: int = 20) -> list[dict]:
-        return self._learnings[-limit:]
+        return [{"text": e} for e in self._memory_entries[-limit:] if "learned" in e.lower() or "lesson" in e.lower()]
 
     # ── Task Memory ──────────────────────────────────────────────────
 
     def record_task(self, task: str, result: str, success: bool, tools_used: list[str] = None):
-        """Record a completed task for future reference."""
         self._task_memory.append({
-            "task": task,
-            "result": result[:500],
-            "success": success,
+            "task": task, "result": result[:500], "success": success,
             "tools_used": tools_used or [],
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
         if len(self._task_memory) > 200:
             self._task_memory = self._task_memory[-200:]
-        self._save(TASK_MEMORY_FILE, self._task_memory)
+        self._save_json(TASK_MEMORY_FILE, self._task_memory)
 
     def get_recent_tasks(self, limit: int = 10) -> list[dict]:
         return self._task_memory[-limit:]
 
-    def get_similar_tasks(self, task: str) -> list[dict]:
-        """Find tasks with similar keywords."""
-        words = set(task.lower().split())
-        scored = []
-        for t in self._task_memory:
-            task_words = set(t["task"].lower().split())
-            overlap = len(words & task_words)
-            if overlap > 0:
-                scored.append((overlap, t))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [t for _, t in scored[:5]]
+    # ── Session Search (hermes pattern: SQLite FTS5) ──────────────────
 
-    # ── Context for LLM ──────────────────────────────────────────────
+    def _init_session_db(self):
+        try:
+            conn = sqlite3.connect(str(SESSION_DB))
+            conn.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS session_search
+                USING fts5(session_id, role, content, timestamp)
+            """)
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.warning("Session DB init failed: %s", e)
 
-    def build_context(self) -> str:
-        """Build a concise memory context string for the LLM system prompt."""
-        parts = []
+    def save_session_message(self, session_id: str, role: str, content: str):
+        """Save a conversation message for future search."""
+        try:
+            conn = sqlite3.connect(str(SESSION_DB))
+            conn.execute(
+                "INSERT INTO session_search(session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+                (session_id, role, content[:2000], datetime.now(timezone.utc).isoformat()),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.warning("Session save failed: %s", e)
 
-        # User profile
-        p = self._user_profile
-        if p.get("name"):
-            parts.append(f"User: {p['name']}")
-        if p.get("tech_stack"):
-            parts.append(f"Tech stack: {', '.join(p['tech_stack'])}")
-        if p.get("coding_style"):
-            parts.append(f"Coding style: {p['coding_style']}")
-        if p.get("preferences"):
-            prefs = "; ".join(f"{k}: {v}" for k, v in p["preferences"].items())
-            parts.append(f"Preferences: {prefs}")
+    def search_sessions(self, query: str, limit: int = 20) -> list[dict]:
+        """Full-text search across past conversations."""
+        try:
+            conn = sqlite3.connect(str(SESSION_DB))
+            rows = conn.execute(
+                "SELECT session_id, role, content, timestamp FROM session_search WHERE content MATCH ? ORDER BY rank LIMIT ?",
+                (query, limit),
+            ).fetchall()
+            conn.close()
+            return [{"session_id": r[0], "role": r[1], "content": r[2][:300], "timestamp": r[3]} for r in rows]
+        except Exception as e:
+            logger.warning("Session search failed: %s", e)
+            return []
 
-        # Recent learnings
-        recent_learnings = self._learnings[-5:]
-        if recent_learnings:
-            parts.append("Recent learnings:")
-            for l in recent_learnings:
-                parts.append(f"  - {l['text']}")
+    # ── Security Scanning (hermes pattern) ────────────────────────────
 
-        # Recent task context
-        recent_tasks = self._task_memory[-3:]
-        if recent_tasks:
-            parts.append("Recent tasks:")
-            for t in recent_tasks:
-                status = "✓" if t["success"] else "✗"
-                parts.append(f"  {status} {t['task'][:80]}")
-
-        return "\n".join(parts) if parts else ""
+    @staticmethod
+    def _security_check(text: str) -> bool:
+        """Block injection/exfiltration patterns from entering memory."""
+        for pattern in INJECTION_PATTERNS:
+            if re.search(pattern, text, re.IGNORECASE):
+                logger.warning("Memory entry blocked by security scan: matched pattern %s", pattern)
+                return False
+        return True
 
     # ── Stats ────────────────────────────────────────────────────────
 
     def stats(self) -> dict:
+        mem_size = sum(len(e) for e in self._memory_entries)
+        user_size = sum(len(e) for e in self._user_entries)
         return {
-            "facts_count": len(self._facts),
-            "learnings_count": len(self._learnings),
+            "memory_entries": len(self._memory_entries),
+            "memory_usage": f"{mem_size}/{MEMORY_CHAR_LIMIT} ({round(mem_size/MEMORY_CHAR_LIMIT*100)}%)" if MEMORY_CHAR_LIMIT else "0",
+            "user_entries": len(self._user_entries),
+            "user_usage": f"{user_size}/{USER_CHAR_LIMIT} ({round(user_size/USER_CHAR_LIMIT*100)}%)" if USER_CHAR_LIMIT else "0",
             "tasks_count": len(self._task_memory),
-            "profile_set": bool(self._user_profile.get("name")),
         }
 
     # ── Persistence helpers ──────────────────────────────────────────
 
     @staticmethod
-    def _load(filepath: Path, default=None):
+    def _load_md(filepath: Path) -> list[str]:
+        """Load entries from a markdown file (§ separated)."""
+        if filepath.exists():
+            text = filepath.read_text(encoding="utf-8").strip()
+            if text:
+                return [e.strip() for e in text.split(ENTRY_SEPARATOR) if e.strip()]
+        return []
+
+    def _save_store(self, target: str):
+        entries = self._memory_entries if target == "memory" else self._user_entries
+        filepath = MEMORY_FILE if target == "memory" else USER_FILE
+        filepath.write_text(ENTRY_SEPARATOR.join(entries), encoding="utf-8")
+
+    @staticmethod
+    def _load_json(filepath: Path, default=None):
         if filepath.exists():
             try:
                 return json.loads(filepath.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, Exception) as e:
-                logger.warning("Failed to load %s: %s", filepath.name, e)
-        return default if default is not None else {}
+            except (json.JSONDecodeError, Exception):
+                pass
+        return default if default is not None else []
 
     @staticmethod
-    def _save(filepath: Path, data):
+    def _save_json(filepath: Path, data):
         filepath.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
 
 
